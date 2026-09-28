@@ -145,7 +145,13 @@ if [ "$BACKEND_DEV" = true ] ; then
     echo "!!!! Manually start backend by connecting to the backend container"
 else
     echo -n "Waiting for backend to start"
-    CHECK_BACKEND_SERVICE="docker compose exec backend curl --fail -s --output /dev/null http://localhost/docs"
+    # Check through the proxy's published port on the host (not "docker compose
+    # exec backend"), since Traefik only routes to the backend once Docker
+    # reports it healthy (start_period delay on the backend healthcheck).
+    # Checking the backend process directly can succeed before Traefik has
+    # wired up routing, leaving callers that go through the proxy (e.g.
+    # th-cli, the frontend) hitting an empty response.
+    CHECK_BACKEND_SERVICE="curl --fail -s --output /dev/null http://localhost/docs"
     until $CHECK_BACKEND_SERVICE >> $BACKEND_LOGFILE_PATH 2>&1
     do
         echo -n "."
