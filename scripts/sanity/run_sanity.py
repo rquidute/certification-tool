@@ -199,6 +199,11 @@ class Harness:
             else:
                 self.record(f"manifest-{s['id']}", g, PASS, f"{s['suite']} / {s['test']}")
         uncovered = sorted(set(self.live) - listed - set(excluded))
+        # '<suite>-custom' suites hold the user's side-loaded files and come and go with them. The custom
+        # step below tests its own fixtures; user files are reported, never silently counted as covered.
+        for u in [x for x in uncovered if x.endswith("-custom")]:
+            uncovered.remove(u)
+            self.record(f"excluded-{u}", g, NOT_RUN, f"user custom suite ({len(self.live[u])} tests); only the harness's own fixtures are tested")
         for u in uncovered:
             self.record(f"uncovered-{u}", g, FAIL, f"suite {u!r} exists in the TH ({len(self.live[u])} tests) but is neither in the manifest nor excluded")
         for suite, reason in excluded.items():

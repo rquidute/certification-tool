@@ -1,5 +1,5 @@
 {
-  "_comment": "One entry per suite. 'suite' = suite public_id and 'test' = test case public_id, both as printed by `python3 scripts/sanity/run_sanity.py --list-suites`. Entries still containing TODO make the run NO-GO by design: the coverage gate lists every live suite that is neither here nor in 'excluded'.",
+  "_comment": "One entry per suite. 'suite' = suite public_id and 'test' = test case public_id, as printed by `python3 scripts/sanity/run_sanity.py --list-suites`. A live suite that is neither in 'suites' nor in 'excluded' makes the run NO-GO (coverage gate). Suites ending in '-custom' are user side-loaded suites and are reported, not tested.",
   "th_cli": "th-cli",
   "th_root": "~/certification-tool",
   "apps_dir": "~/apps",
@@ -13,20 +13,20 @@
     }
   },
   "suites": [
-    {"id": "python-main", "suite": "TODO", "test": "TC_CGEN_2_5", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "yaml-chip-tool", "suite": "FirstChipToolSuite", "test": "TC-ACE-1.1", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "onboarding-payload", "suite": "OnboardingPayloadTestSuite", "test": "TC-DD-1.1", "dut": null, "expect": "pass"},
+    {"id": "python-auto-commissioning", "suite": "Python Testing Suite - Auto commissioning", "test": "TC_ACE_1_3", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "python-mandatories", "suite": "Python Testing Suite - Mandatories", "test": "TC_IDM_10_2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "python-no-auto-commissioning", "suite": "Python Testing Suite - No auto commissioning", "test": "TC_CGEN_2_5", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
     {"id": "python-old-format", "suite": "Python Testing Suite - Old script format", "test": "TC_ACE_1_2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass",
      "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^no$"}]},
     {"id": "python-old-format-reuse-credentials", "suite": "Python Testing Suite - Old script format", "test": "TC_ACE_1_2", "dut": "all-clusters", "dut_start": "reuse", "expect": "pass",
      "depends_on": "python-old-format",
-     "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^yes$"}]},
-    {"id": "yaml-chip-tool", "suite": "TODO", "test": "TODO", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
-    {"id": "sample-suite-1", "suite": "TODO", "test": "TODO", "dut": null, "expect": "pass"},
-    {"id": "sample-suite-2", "suite": "TODO", "test": "TODO", "dut": null, "expect": "pass"},
-    {"id": "sample-suite-3-mandatory", "suite": "TODO", "test": "TODO", "dut": null, "expect": "pass"}
+     "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^yes$"}]}
   ],
   "excluded": [
-    {"suite": "TODO-simulated-yaml", "reason": "Simulated YAML needs an external controller to commission chip-app1; not automatable here"},
-    {"suite": "TODO-manual-yaml", "reason": "Manual tests require a human"}
+    {"suite": "FirstAppSuite", "reason": "Simulated YAML (DUT is chip-app run by the TH); needs an external controller to commission it, not automatable here"},
+    {"suite": "FirstManualSuite", "reason": "Manual tests require a human"}
   ],
   "default_prompt_answers": [
     {"match": "(?i)commissioning mode|ready|continue|press", "choose": "(?i)^(yes|ok|done|continue|pass|ready|y)$"}
@@ -35,7 +35,7 @@
     "yaml": {
       "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/sdk/Test_TC_ACE_1_1.yaml",
       "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/custom",
-      "test": "TC_ACE_1_1",
+      "test": "TC-ACE-1.1",
       "dut": "all-clusters"
     },
     "python": {
