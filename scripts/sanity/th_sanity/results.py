@@ -42,9 +42,11 @@ class Results:
               + paint(name, "bold") + "   " + self.tally(), flush=True)
 
     # ---- recording
-    def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "") -> str:
+    def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "",
+               command: str = "", dut_command: str = "") -> str:
+        """`command` is the th-cli command line the step ran; `dut_command` how the DUT app was started."""
         self.steps.append({"id": sid, "group": group, "status": status, "detail": detail.strip()[-1500:],
-                           "duration_s": round(dur, 1), "log": log})
+                           "duration_s": round(dur, 1), "log": log, "command": command, "dut_command": dut_command})
         badge = paint(f"{SYMBOL[status]} {LABEL[status]}", "bold", STATUS_COLOR[status])
         took = paint(f" ({dur:.0f}s)", "gray") if dur >= 1 else ""
         lines = detail.strip().splitlines()
@@ -52,8 +54,11 @@ class Results:
         print(f"{self.stamp()} {badge} {paint(group + '/', 'gray')}{paint(sid, 'bold')}{took} "
               f"{paint(first, 'dim') if status != FAIL else first}", flush=True)
         if status == FAIL:  # show why right away instead of only in the report
+            bar_ = paint("           │ " if console.UNICODE else "           | ", "red")
+            if command:
+                print(bar_ + paint(f"command: {command}", "dim"), flush=True)
             for ln in lines[1:15]:
-                print(paint("           │ " if console.UNICODE else "           | ", "red") + paint(ln[:140], "dim"), flush=True)
+                print(bar_ + paint(ln[:140], "dim"), flush=True)
         return status
 
     # ---- verdict

@@ -1,5 +1,6 @@
 """Shared state and services for one sanity run. Phases receive a Session and never touch globals."""
 import os
+import shlex
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,6 +12,14 @@ from .thcli import ThCli
 # <run dir>/<category>/<step id>/... : every step keeps its own artifacts (transcript, DUT log, th-cli run log, exports)
 STEP_DIRS = {"suites": "suites", "custom": "custom", "cli": "cli", "executions": "cli", "coverage": "coverage",
              "cleanup": "cleanup", "harness": "harness"}
+
+
+def shell_join(parts: List[str]) -> str:
+    """A command line that can be pasted back into a shell."""
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+CLI_OUTPUT = "cli-output.txt"  # the command, its exit code and its full output, one per CLI step
 
 
 class Session:
@@ -58,19 +67,31 @@ class Session:
         return fx
 
     # ---- recording shortcuts
-    def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "") -> str:
-        return self.results.record(sid, group, status, detail, dur, log)
+    def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "",
+               command: str = "", dut_command: str = "") -> str:
+        return self.results.record(sid, group, status, detail, dur, log, command, dut_command)
+
+    def save_cli_output(self, group: str, sid: str, args: List[str], rc: int, out: str, secs: float) -> str:
+        """Keep a CLI command's output with its step: <run>/<category>/<step>/cli-output.txt."""
+        path = os.path.join(self.step_dir(group, sid), CLI_OUTPUT)
+        with open(path, "w") as f:
+            f.write(f"$ {shell_join([self.th.binary, *args])}\nexit code: {rc}\n"
+                    f"duration: {secs:.1f}s\n----- output -----\n{out}")
+            if not out.endswith("\n"):
+                f.write("\n")
+        return path
 
     def cli_step(self, sid: str, group: str, args: List[str], ok_rc: Tuple[int, ...] = (0,), env: Optional[dict] = None,
                  must_contain: str = "", timeout: int = 120) -> Tuple[bool, str]:
         """Run one th-cli command as a recorded step. Passes when the exit code is allowed and the output contains
-        `must_contain`."""
+        `must_contain`. The full output is saved in the step folder."""
         t0 = time.time()
         rc, out = self.th.run(args, timeout=timeout, env=env)
+        self.save_cli_output(group, sid, args, rc, out, time.time() - t0)
         good = rc in ok_rc and (must_contain in out)
         why = "" if good else f"rc={rc}" + (f", missing {must_contain!r}" if must_contain not in out else "")
         self.record(sid, group, PASS if good else FAIL, why + "\n" + out[-400:] if not good else "th-cli " + " ".join(args),
-                    time.time() - t0)
+                    time.time() - t0, command=shell_join([self.th.binary, *args]))
         return good, out
 
     # ---- DUT

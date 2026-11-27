@@ -112,9 +112,21 @@ sanity_reports/
     │   ├── transcript.out                               what th-cli printed, written live
     │   ├── dut.log                                      the DUT app's log for this step
     │   └── th-cli-run.log                               th-cli's own run log, copied from ./run_logs
-    ├── custom/rescan-add/rescan.out                     full rescan output
-    └── cli/execution-log/exec_log.txt                   exports and downloads of CLI commands
+    ├── custom/custom-rescan-add/cli-output.txt          full rescan output
+    └── cli/execution-log/
+        ├── cli-output.txt                               the command, exit code, duration and FULL output
+        └── exec_log.txt                                 file the command exported or downloaded (-o)
 ```
+
+Every step that runs a `th-cli` command (CLI commands, rescans, project and execution commands, cleanup deletes,
+the abort request) keeps `cli-output.txt` in its folder: the command line (shell-quoted, so it can be pasted back),
+the exit code, the duration and the **full** output, not the 400 characters shown on the console when a step fails.
+Test runs keep `transcript.out` instead. Internal read-only queries that are not steps (e.g. polling the runner state)
+are not saved.
+
+Every step also records **the command line it ran** (shell-quoted, so it can be pasted back) and, for tests, **how the
+DUT app was started**. They are in `report.json` (`command`, `dut_command`), in a *Command* column of `report.md`, in the
+*Needs attention* section, and on the console right under a failing step.
 
 The console and `report.md` group results into **Test suites**, **Custom tests**, **CLI commands**, **Coverage gate**
 and **Harness**. Coverage checks are counted separately: they are a pre-flight gate, not test results.

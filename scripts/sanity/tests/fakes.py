@@ -45,12 +45,14 @@ class FakePrompts:
 class FakeDut:
     def __init__(self, error: Optional[str] = None) -> None:
         self.error, self.started, self.log_path, self.ready_how, self.alive = error, [], None, "fake", True
+        self.last_command = ""
 
     def start(self, profile, fresh=True, log_dir=None):
         from th_sanity.dut import DutError
         if self.error:
             raise DutError(self.error)
         self.started.append((profile, fresh))
+        self.last_command = f"/home/u/apps/{profile}-app --wifi"
         self.log_path = os.path.join(log_dir or "/tmp", "dut.log")
 
     def is_alive(self):

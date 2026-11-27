@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import threading
@@ -407,6 +408,167 @@ class Abort(unittest.TestCase):
         s2 = make_session()
         abort.run(s2)
         self.assertEqual(s2.results.steps, [])
+
+
+class CliOutputIsKept(unittest.TestCase):
+    """Every th-cli command that is a step keeps its command, exit code and full output in the step folder."""
+
+    def read(self, s, group_dir, sid):
+        with open(os.path.join(s.out_dir, group_dir, sid, "cli-output.txt")) as f:
+            return f.read()
+
+    def test_passing_and_failing_steps_both_keep_the_full_output(self):
+        th = FakeTh()
+        th.handler = lambda a: (0, "line one\nline two\n") if a[0] == "project" else (1, "Error: boom\nmore detail")
+        s = make_session(th=th)
+        s.cli_step("project-list", "cli", ["project", "list", "--json"])
+        s.cli_step("rescan-tests", "cli", ["rescan-tests"])
+        ok = self.read(s, "cli", "project-list")
+        self.assertIn("$ th-cli project list --json", ok)
+        self.assertIn("exit code: 0", ok)
+        self.assertIn("line one\nline two", ok)
+        bad = self.read(s, "cli", "rescan-tests")
+        self.assertIn("exit code: 1", bad)
+        self.assertIn("Error: boom\nmore detail", bad)  # whole output, not the 400 characters the console shows
+
+    def test_arguments_are_shell_quoted_so_the_command_can_be_pasted_back(self):
+        s = make_session()
+        s.cli_step("rename", "cli", ["test-run-execution", "rename", "-i", "5", "-n", "my name; rm"])
+        self.assertIn("-n 'my name; rm'", self.read(s, "cli", "rename"))
+
+    def test_execution_and_custom_steps_land_in_their_category_folder(self):
+        s = make_session()
+        s.cli_step("execution-list", "executions", ["test-run-execution", "list"])
+        s.cli_step("custom-rescan-add", "custom", ["rescan-tests"])
+        s.cli_step("cleanup-project-3", "cleanup", ["project", "delete", "-i", "3", "-y"])
+        self.assertTrue(os.path.isfile(os.path.join(s.out_dir, "cli", "execution-list", "cli-output.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(s.out_dir, "custom", "custom-rescan-add", "cli-output.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(s.out_dir, "cleanup", "cleanup-project-3", "cli-output.txt")))
+
+    def test_pics_export_keeps_its_output_even_though_it_is_not_a_cli_step(self):
+        th = FakeTh()
+        th.handler = lambda a: (1, "Error: (Status: 404) - No PICS were used by this test run execution")
+        s = make_session(th=th)
+        executions._pics_export(s, "executions", "36", s.out_dir)
+        self.assertIn("No PICS were used", self.read(s, "cli", "execution-pics-export"))
+
+    def test_the_abort_response_is_kept_next_to_the_abort_transcript(self):
+        s = Abort().session()
+        abort.run(s)
+        saved = self.read(s, "cli", "abort-testing-running")
+        self.assertIn("$ th-cli abort-testing", saved)
+        self.assertIn("Aborting testing.", saved)
+
+    def test_a_custom_failure_points_at_a_rescan_output_file_that_exists(self):
+        tmp = tempfile.mkdtemp()
+        src, dst = os.path.join(tmp, "sdk"), os.path.join(tmp, "custom")
+        os.makedirs(src)
+        os.makedirs(dst)
+        open(os.path.join(src, "c.yaml"), "w").write("x")
+        th = FakeTh()
+        th.handler = lambda a: (0, "rescan said: nothing new") if a[0] == "rescan-tests" else (0, avail({"S": ["T"]}))
+        s = make_session(th=th, custom=[{"id": "fc", "kind": "yaml", "src": src + "/c.yaml", "dest_dir": dst,
+                                         "test": "TC-C", "expect_suite": "Y-custom"}])
+        custom.run(s)
+        detail = next(x["detail"] for x in s.results.steps if x["id"] == "custom-fc-visible")
+        path = detail.split("full rescan output: ")[1].strip()
+        self.assertTrue(os.path.isfile(path), path)
+        self.assertIn("rescan said: nothing new", open(path).read())
+
+    def test_the_whole_cli_phase_leaves_one_output_file_per_command_step(self):
+        th = FakeTh()
+        created = []
+
+        def handler(a):
+            if a[:2] == ["project", "create"]:
+                created.append(a[3])  # the harness names its project from the clock; echo it back
+            if a[0] == "test-runner-status":
+                return 0, js({"state": "TestRunnerState.IDLE"})
+            if a[:2] == ["project", "list"]:
+                return 0, js([{"id": 1, "name": created[0]}] if created else [])
+            if a[0] == "abort-testing":
+                return 1, "Error: Failed to abort testing (Status: 409) - Test Engine is not active."
+            return 0, "ok"
+        th.handler = handler
+        s = make_session(th=th)
+        cli_commands.run(s)
+        steps = [x["id"] for x in s.results.steps if x["group"] == "cli"]
+        recorded_only = {"runner-idle-before-abort", "runner-still-idle-after-abort"}  # state checks, no command output
+        for sid in steps:
+            if sid not in recorded_only:
+                self.assertTrue(os.path.isfile(os.path.join(s.out_dir, "cli", sid, "cli-output.txt")), sid)
+        self.assertIn("abort-testing-idle-refused", steps)
+
+
+class CommandLines(unittest.TestCase):
+    """The th-cli command line (and how the DUT was started) is recorded per step and shown in the report."""
+
+    def step(self, s, sid):
+        return next(x for x in s.results.steps if x["id"] == sid)
+
+    def test_cli_step_records_a_pasteable_command(self):
+        s = make_session()
+        s.cli_step("rename", "executions", ["test-run-execution", "rename", "-i", "5", "-n", "my name"])
+        self.assertEqual(self.step(s, "rename")["command"], "th-cli test-run-execution rename -i 5 -n 'my name'")
+
+    def test_test_run_records_the_run_tests_command_and_the_dut_start(self):
+        s = make_session(prompts=FakePrompts(("Results: 1 passed\n", 0, "")))
+        s.project_id = 15
+        run_test(s, "run-x", "suites", "TC-ACE-1.1", "pass", [], "d", "fresh", config="/m/cfg.json")
+        step = self.step(s, "run-x")
+        self.assertEqual(step["command"], "th-cli run-tests -t TC-ACE-1.1 -n sanity-run-x --no-color --no-streaming "
+                                          "--project-id 15 -c /m/cfg.json")
+        self.assertEqual(step["dut_command"], "/home/u/apps/d-app --wifi")
+
+    def test_a_test_without_a_dut_has_no_dut_command(self):
+        s = make_session(prompts=FakePrompts(("Results: 1 passed\n", 0, "")))
+        run_test(s, "run-x", "suites", "TC-1", "pass", [], None, "fresh")
+        self.assertEqual(self.step(s, "run-x")["dut_command"], "")
+
+    def test_infrastructure_failures_keep_the_command_too(self):
+        s = make_session(prompts=FakePrompts(("", -1, "timeout after 5s")))
+        run_test(s, "run-x", "suites", "TC-1", "pass", [], None, "fresh")
+        self.assertIn("run-tests -t TC-1", self.step(s, "run-x")["command"])
+
+    def test_failure_on_the_console_shows_the_command_first(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            s = make_session(prompts=FakePrompts(("Results: 1 failed\n", 1, "")))
+            run_test(s, "run-x", "suites", "TC-1", "pass", [], None, "fresh")
+        lines = buf.getvalue().splitlines()
+        i = next(n for n, ln in enumerate(lines) if "FAIL" in ln)
+        self.assertIn("command: th-cli run-tests -t TC-1", lines[i + 1])
+
+    def test_repeat_and_abort_record_their_commands(self):
+        s = Executions().session()
+        executions._repeat(s, "executions", "y", s.step_dir("executions", "execution-repeat"))
+        rep = self.step(s, "execution-repeat")
+        self.assertIn("test-run-execution repeat -i 36", rep["command"])
+        self.assertEqual(rep["dut_command"], "/home/u/apps/d-app --wifi")
+        a = Abort().session()
+        abort.run(a)
+        ab = self.step(a, "abort-testing-running")
+        self.assertIn("run-tests -t T", ab["command"])
+        self.assertIn("aborted with: th-cli abort-testing", ab["command"])
+
+    def test_report_has_a_command_column_and_the_json_has_the_fields(self):
+        s = make_session(prompts=FakePrompts(("Results: 1 failed\n", 1, "")))
+        run_test(s, "run-x", "suites", "TC-1", "pass", [], "d", "fresh")
+        s.cli_step("piped", "cli", ["x", "a|b"])
+        report.write_report(s, "v1")
+        md = open(os.path.join(s.out_dir, "report.md")).read()
+        self.assertIn("| Step | Status | Time s | Command | Detail |", md)
+        self.assertIn("`th-cli run-tests -t TC-1 -n sanity-run-x --no-color --no-streaming`<br>DUT: `/home/u/apps/d-app --wifi`", md)
+        self.assertIn("a\\|b", md)  # a pipe inside a command must not break the table
+        needs = md.split("## Needs attention")[1]
+        self.assertIn("Command:\n```\nth-cli run-tests -t TC-1", needs)
+        self.assertIn("DUT started with:\n```\n/home/u/apps/d-app --wifi", needs)
+        data = json.load(open(os.path.join(s.out_dir, "report.json")))
+        row = next(x for x in data["steps"] if x["id"] == "run-x")
+        self.assertTrue(row["command"].startswith("th-cli run-tests"))
+        self.assertEqual(row["dut_command"], "/home/u/apps/d-app --wifi")
 
 
 class Report(unittest.TestCase):

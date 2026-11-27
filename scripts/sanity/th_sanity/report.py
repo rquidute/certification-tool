@@ -8,6 +8,16 @@ from .results import FAIL, NOT_RUN, PASS, STATUSES, counts
 from .session import Session
 
 
+def _command_cell(step: dict) -> str:
+    """Markdown table cell: the th-cli command, and how the DUT was started when the step used one."""
+    def code(text: str) -> str:
+        return "`" + text.replace("|", "\\|").replace("`", "'") + "`"
+    cell = code(step["command"]) if step.get("command") else ""
+    if step.get("dut_command"):
+        cell += ("<br>" if cell else "") + "DUT: " + code(step["dut_command"])
+    return cell
+
+
 def _markdown(s: Session, version: str, go: bool, fails, unexpected) -> str:
     cats = s.results.by_category()
     lines = [f"# TH sanity report - {version}", "", f"- Date: {os.path.basename(s.out_dir)}",
@@ -18,15 +28,19 @@ def _markdown(s: Session, version: str, go: bool, fails, unexpected) -> str:
         n = counts(st)
         lines.append(f"| {c} | {n[PASS]} | {n[FAIL]} | {n[NOT_RUN]} |")
     for c, st in cats.items():
-        lines += ["", f"## {c}", "", "| Step | Status | Time s | Detail |", "|---|---|---|---|"]
+        lines += ["", f"## {c}", "", "| Step | Status | Time s | Command | Detail |", "|---|---|---|---|---|"]
         for step in st:
             det = step["detail"].splitlines()[0][:140] if step["detail"] else ""
-            lines.append(f"| {step['id']} | {step['status']} | {step['duration_s']} | {det.replace('|', '/')} |")
+            lines.append(f"| {step['id']} | {step['status']} | {step['duration_s']} | {_command_cell(step)} | {det.replace('|', '/')} |")
     if fails or unexpected:
         lines += ["", "## Needs attention"]
         for step in fails + unexpected:
-            lines += [f"### {step['group']}/{step['id']} ({step['status']})", "```", step["detail"], "```",
-                      f"log: {step['log']}" if step["log"] else ""]
+            lines += [f"### {step['group']}/{step['id']} ({step['status']})"]
+            if step.get("command"):
+                lines += ["Command:", "```", step["command"], "```"]
+            if step.get("dut_command"):
+                lines += ["DUT started with:", "```", step["dut_command"], "```"]
+            lines += ["```", step["detail"], "```", f"log: {step['log']}" if step["log"] else ""]
     return "\n".join(lines) + "\n"
 
 

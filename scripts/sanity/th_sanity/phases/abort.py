@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from .. import console
 from ..results import FAIL, NOT_RUN, PASS
-from ..session import Session
+from ..session import Session, shell_join
 
 G = "cli"
 STEP = "abort-testing-running"
@@ -34,6 +34,12 @@ def run(s: Session) -> None:
     args = [s.th.binary, "run-tests", "-t", meta["test"], "-n", "sanity-abort-while-running", "--no-color", "--no-streaming"]
     if s.project_id:
         args += ["--project-id", str(s.project_id)]
+    cmd = shell_join(args) + "   # then aborted with: " + shell_join([s.th.binary, "abort-testing"])
+    dcmd = getattr(s.dut, "last_command", "") if meta.get("dut") else ""
+
+    def rec(*a, **k):
+        return s.record(*a, command=cmd, dut_command=dcmd, **k)
+
     result: Dict[str, Any] = {}
 
     def worker() -> None:
@@ -46,7 +52,7 @@ def run(s: Session) -> None:
     th.start()
     running, st = s.th.wait_state("running", 90, stop=th)
     if not running:
-        s.record(STEP, G, FAIL,
+        rec(STEP, G, FAIL,
                  f"runner never reached 'running' (last state {st!r}); the run "
                  f"{'ended first' if not th.is_alive() else 'is stuck'}: {str(result.get('why') or result.get('out', ''))[-300:]}",
                  time.time() - t0)
@@ -54,11 +60,13 @@ def run(s: Session) -> None:
         return
     time.sleep(cfg.get("after_s", 8))  # let the test get properly under way
     if not th.is_alive():
-        s.record(STEP, G, FAIL, f"test finished before the abort was sent; pick a longer test in abort_run.from "
+        rec(STEP, G, FAIL, f"test finished before the abort was sent; pick a longer test in abort_run.from "
                  f"(after_s={cfg.get('after_s', 8)})", time.time() - t0)
         return
+    t_abort = time.time()
     rc, out = s.th.run(["abort-testing"], timeout=60)
-    s.record(STEP, G, PASS if rc == 0 else FAIL,
+    s.save_cli_output(G, STEP, ["abort-testing"], rc, out, time.time() - t_abort)
+    rec(STEP, G, PASS if rc == 0 else FAIL,
              f"abort accepted: {out.strip()[-100:]}" if rc == 0 else f"rc={rc}\n{out.strip()[-300:]}", time.time() - t0)
     th.join(timeout=120)
     s.record("run-ends-after-abort", G, PASS if not th.is_alive() else FAIL,

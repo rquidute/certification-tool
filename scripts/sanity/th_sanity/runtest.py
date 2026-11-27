@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from . import console
 from .results import FAIL, PASS
-from .session import Session
+from .session import Session, shell_join
 
 
 def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: List[dict], dut: Optional[str],
@@ -31,6 +31,7 @@ def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: 
         args += ["--project-id", str(s.project_id)]
     if config:
         args += ["-c", config]
+    cmd, dut_cmd = shell_join(args), (getattr(s.dut, "last_command", "") if dut else "")
     out, rc, why = s.prompts.run(args, answers + s.m.get("default_prompt_answers", []), timeout,
                                  transcript=os.path.join(sdir, "transcript.out"), text_rules=text_answers)
     log = (re.findall(r"Log output in:?\s*(\S+)", out) or [""])[-1]
@@ -44,12 +45,14 @@ def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: 
         why = why or "DUT process died during the run"
     if why:
         extra = "" if why.startswith("UNHANDLED") else "\n" + out[-400:]
-        s.record(sid, group, FAIL, f"INFRA: {why}{extra}", time.time() - t0, log)
+        s.record(sid, group, FAIL, f"INFRA: {why}{extra}", time.time() - t0, log, command=cmd, dut_command=dut_cmd)
         return s.th.last_execution()
     if not results and rc != 0:
-        s.record(sid, group, FAIL, f"INFRA: rc={rc}, no Results line\n{out[-400:]}", time.time() - t0, log)
+        s.record(sid, group, FAIL, f"INFRA: rc={rc}, no Results line\n{out[-400:]}", time.time() - t0, log,
+                 command=cmd, dut_command=dut_cmd)
         return s.th.last_execution()
     actual = "pass" if rc == 0 else "fail"
     s.record(sid, group, PASS if actual == expect else FAIL,
-             f"{test}: {results or 'no results line'} (expected {expect}, got {actual})", time.time() - t0, log)
+             f"{test}: {results or 'no results line'} (expected {expect}, got {actual})", time.time() - t0, log,
+             command=cmd, dut_command=dut_cmd)
     return s.th.last_execution()

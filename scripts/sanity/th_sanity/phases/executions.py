@@ -4,7 +4,7 @@ import time
 
 from .. import console
 from ..results import FAIL, NOT_RUN, PASS
-from ..session import Session
+from ..session import Session, shell_join
 
 
 def run(s: Session) -> None:
@@ -33,13 +33,17 @@ def run(s: Session) -> None:
 
 
 def _pics_export(s: Session, g: str, i: str, out_dir: str) -> None:
-    rc, out = s.th.run(["test-run-execution", "pics-export", "-i", i, "-o", os.path.join(out_dir, "exec_pics")])
+    args = ["test-run-execution", "pics-export", "-i", i, "-o", os.path.join(out_dir, "exec_pics")]
+    t0 = time.time()
+    rc, out = s.th.run(args)
+    s.save_cli_output(g, "execution-pics-export", args, rc, out, time.time() - t0)
+    cmd = shell_join([s.th.binary, *args])
     if rc == 0:
-        s.record("execution-pics-export", g, PASS, "exported")
+        s.record("execution-pics-export", g, PASS, "exported", command=cmd)
     elif "No PICS were used" in out:  # a 404 with that exact reason is the documented answer for PICS-less runs
-        s.record("execution-pics-export", g, PASS, "endpoint answered 'No PICS were used' (expected for these runs); the export path itself is NOT exercised")
+        s.record("execution-pics-export", g, PASS, "endpoint answered 'No PICS were used' (expected for these runs); the export path itself is NOT exercised", command=cmd)
     else:
-        s.record("execution-pics-export", g, FAIL, f"rc={rc}\n{out[-400:]}")
+        s.record("execution-pics-export", g, FAIL, f"rc={rc}\n{out[-400:]}", command=cmd)
 
 
 def _export_import(s: Session, g: str, i: str, out_dir: str) -> None:
@@ -70,17 +74,18 @@ def _repeat(s: Session, g: str, target, sdir: str) -> None:
     orig_state = s.th.exec_state(orig)
     console.note(f"repeating execution {orig} ({target}, state {orig_state})")
     args = [s.th.binary, "test-run-execution", "repeat", "-i", str(orig), "--no-color", "--no-streaming"]
+    rec = {"command": shell_join(args), "dut_command": getattr(s.dut, "last_command", "") if meta.get("dut") else ""}
     out, rc, why = s.prompts.run(args, s.prompt_rules(meta), s.run_timeout,
                                  transcript=os.path.join(sdir, "transcript.out"), text_rules=meta.get("text_answers"))
     new_ids = sorted(s.th.exec_set() - before)
     new_state = s.th.exec_state(new_ids[-1]) if new_ids else None
     if why:
-        s.record("execution-repeat", g, FAIL, f"INFRA: {why}", time.time() - t0)
+        s.record("execution-repeat", g, FAIL, f"INFRA: {why}", time.time() - t0, **rec)
     elif not new_ids:
-        s.record("execution-repeat", g, FAIL, f"rc={rc}, but no new execution was created\n{out[-300:]}", time.time() - t0)
+        s.record("execution-repeat", g, FAIL, f"rc={rc}, but no new execution was created\n{out[-300:]}", time.time() - t0, **rec)
     elif new_state != orig_state:
-        s.record("execution-repeat", g, FAIL, f"execution {new_ids[-1]} ended {new_state!r}, original {orig} was {orig_state!r}", time.time() - t0)
+        s.record("execution-repeat", g, FAIL, f"execution {new_ids[-1]} ended {new_state!r}, original {orig} was {orig_state!r}", time.time() - t0, **rec)
     else:
-        s.record("execution-repeat", g, PASS, f"execution {orig} repeated as {new_ids[-1]}, both {new_state!r}", time.time() - t0)
+        s.record("execution-repeat", g, PASS, f"execution {orig} repeated as {new_ids[-1]}, both {new_state!r}", time.time() - t0, **rec)
     for x in new_ids:
         s.cli_step(f"execution-delete-repeated-{x}", g, ["test-run-execution", "delete", "-i", str(x), "-y"])

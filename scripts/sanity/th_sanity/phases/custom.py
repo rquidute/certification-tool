@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 from ..results import FAIL, NOT_RUN, PASS
 from ..runtest import run_test
-from ..session import Session
+from ..session import CLI_OUTPUT, Session
 from . import coverage
 
 
@@ -22,11 +22,6 @@ def find_custom(live: Dict[str, set], base: str, suite: Optional[str] = None) ->
             if norm(base) in norm(t) and ("custom" in t.lower() or sname.lower().endswith("-custom")):
                 return sname, t
     return None
-
-
-def _write(path: str, text: str) -> None:
-    with open(path, "w") as fh:
-        fh.write(text)
 
 
 def run(s: Session) -> None:
@@ -54,9 +49,8 @@ def run(s: Session) -> None:
                 placed.append((f, dest))
         if not placed:
             return
-        _, rescan_out = s.cli_step("custom-rescan-add", g, ["rescan-tests"], timeout=180)
-        rescan_file = os.path.join(s.step_dir(g, "rescan-add"), "rescan.out")
-        _write(rescan_file, rescan_out)
+        s.cli_step("custom-rescan-add", g, ["rescan-tests"], timeout=180)
+        rescan_file = os.path.join(s.step_dir(g, "custom-rescan-add"), CLI_OUTPUT)
         coverage.load_live(s)
         for f, _ in placed:
             _check_one(s, f, rescan_file)
@@ -65,8 +59,7 @@ def run(s: Session) -> None:
             if os.path.exists(dest):
                 os.remove(dest)
         if placed:
-            _, out_rm = s.cli_step("custom-rescan-remove", g, ["rescan-tests"], timeout=180)
-            _write(os.path.join(s.step_dir(g, "rescan-remove"), "rescan.out"), out_rm)
+            s.cli_step("custom-rescan-remove", g, ["rescan-tests"], timeout=180)
             coverage.load_live(s)
             for f, _ in placed:
                 left = find_custom(s.live, f["test"], f.get("expect_suite"))

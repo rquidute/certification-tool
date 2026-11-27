@@ -14,6 +14,7 @@ files with `wipe`, and the quiet period with `quiet_s`.
 """
 import os
 import re
+import shlex
 import signal
 import subprocess
 import time
@@ -73,6 +74,7 @@ class DutManager:
         self.profile_name: Optional[str] = None
         self.log_path: Optional[str] = None
         self.ready_how = ""  # how the last start was judged ready (for the step note)
+        self.last_command = ""  # command line of the last start, for the report
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -114,6 +116,7 @@ class DutManager:
         target = log_dir or self.log_dir  # the step folder, so the DUT log sits next to the step's transcript
         os.makedirs(target, exist_ok=True)
         self.log_path = os.path.join(target, "dut.log")
+        self.last_command = " ".join(shlex.quote(p) for p in [binary, *prof.get("args", [])])
         with open(self.log_path, "w") as log:  # the child keeps its own copy of the descriptor
             self.proc = subprocess.Popen(
                 [binary, *prof.get("args", [])], cwd=self.apps_dir, stdout=log, stderr=subprocess.STDOUT
