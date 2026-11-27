@@ -91,6 +91,7 @@ class Harness:
         self.project_id: Optional[int] = None
         self.extra_projects: List[int] = []
         self.exec_ids: Dict[str, int] = {}  # step id -> execution id
+        self.exec_meta: Dict[str, dict] = {}  # step id -> manifest entry that produced it
         self.live: Dict[str, set] = {}  # suite id -> test ids
         os.makedirs(out_dir, exist_ok=True)
 
@@ -108,14 +109,14 @@ class Harness:
         print(f"\n[{self.elapsed()}] ===== Phase {n}/5: {name} ({self.tally()}) =====", flush=True)
 
     def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "") -> str:
-        self.steps.append({"id": sid, "group": group, "status": status, "detail": detail.strip()[-600:],
+        self.steps.append({"id": sid, "group": group, "status": status, "detail": detail.strip()[-1500:],
                            "duration_s": round(dur, 1), "log": log})
         mark = {"PASS": "ok  ", "FAIL": "FAIL", "NOT_RUN": "skip"}[status]
         took = f" ({dur:.0f}s)" if dur >= 1 else ""
         lines = detail.strip().splitlines()
         print(f"[{self.elapsed()}] [{mark}] {group}/{sid}{took} {lines[0][:100] if lines else ''}", flush=True)
         if status == FAIL:  # show why right away instead of only in the report
-            for ln in lines[1:9]:
+            for ln in lines[1:15]:
                 print(f"           | {ln[:140]}", flush=True)
         return status
 
@@ -175,7 +176,6 @@ class Harness:
         self.cli_step("project-update", g, ["project", "update", "-i", pid, "-n", name + "-renamed"])
         self.cli_step("project-edit", g, ["project", "edit", "-i", pid], env={"EDITOR": "true", "VISUAL": "true"})
         self.cli_step("project-applicable-tests", g, ["project", "applicable-tests", "-i", pid, "--json"])
-        self.cli_step("project-logs", g, ["project", "logs", "-i", pid, "-o", os.path.join(self.out_dir, "project_logs")])
         exp = os.path.join(self.out_dir, "project_export.json")
         if self.cli_step("project-export", g, ["project", "export", "-i", pid, "-o", exp])[0]:
             before = {p.get("id") for p in items(self.cli_json(["project", "list", "--json"]))}
@@ -183,7 +183,8 @@ class Harness:
                 after = {p.get("id") for p in items(self.cli_json(["project", "list", "--json"]))}
                 self.extra_projects += sorted(x for x in after - before if x is not None)
         self.cli_step("rescan-tests", g, ["rescan-tests"])
-        self.cli_step("abort-testing-idle", g, ["abort-testing"])
+        # With nothing running the CLI must refuse, and say why. Accepting any failure would hide real errors.
+        self.cli_step("abort-testing-idle-refused", g, ["abort-testing"], ok_rc=(1,), must_contain="not active")
 
     def find_project(self, name: str) -> Optional[int]:
         for p in items(self.cli_json(["project", "list", "--json"])):
@@ -301,7 +302,8 @@ class Harness:
         if dut and not self.dut.is_alive():
             why = why or "DUT process died during the run"
         if why:
-            self.record(sid, group, FAIL, f"INFRA: {why}\n{out[-400:]}", time.time() - t0, log)
+            extra = "" if why.startswith("UNHANDLED") else "\n" + out[-400:]
+            self.record(sid, group, FAIL, f"INFRA: {why}{extra}", time.time() - t0, log)
             return self.last_execution()
         if not results and rc != 0:
             self.record(sid, group, FAIL, f"INFRA: rc={rc}, no Results line\n{out[-400:]}", time.time() - t0, log)
@@ -361,7 +363,7 @@ class Harness:
                                         if re.search(r_["match"], block)), None)
                             if ans is None:
                                 why = "UNHANDLED TEXT PROMPT (no text_answers rule matched, or its value could " \
-                                      "not be resolved): " + block[-300:].replace("\n", " | ")
+                                      "not be resolved). The prompt was:\n" + "\n".join(block.splitlines()[-8:])
                                 break
                             os.write(master, (ans + "\n").encode())
                             since_answer = len(buf)
@@ -369,7 +371,9 @@ class Harness:
                             block = buf[since_answer:]
                             num = self.answer_for(block, rules)
                             if num is None:
-                                why = "UNHANDLED PROMPT (no answer rule matched): " + block[-300:].replace("\n", " | ")
+                                upto = block[:block.index(PROMPT_TRIGGER) + len(PROMPT_TRIGGER)]
+                                why = "UNHANDLED PROMPT (no answer rule matched). The prompt was:\n" + \
+                                      "\n".join(upto.splitlines()[-12:])
                                 break
                             os.write(master, (num + "\n").encode())
                             since_answer = len(buf)
@@ -445,11 +449,20 @@ class Harness:
             done[sid] = self.steps[-1]["status"] if len(self.steps) > n else FAIL
             if eid and done[sid] == PASS:
                 self.exec_ids[sid] = eid
-                if not s.get("dut"):
-                    self.exec_ids.setdefault("_nodut", eid)
+                self.exec_meta[sid] = s
 
     def abs_path(self, p: Optional[str]) -> Optional[str]:
         return os.path.join(self.manifest_dir, p) if p and not os.path.isabs(p) else p
+
+    def find_custom(self, base: str) -> Optional[Tuple[str, str]]:
+        """(suite, test id) of a side-loaded variant of `base`. Python overrides get a '-custom' id suffix;
+        custom YAML tests land in a '<suite>-custom' suite, possibly with the same id as the SDK test."""
+        norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())  # noqa: E731
+        for suite, tests in self.live.items():
+            for t in tests:
+                if norm(base) in norm(t) and ("custom" in t.lower() or suite.lower().endswith("-custom")):
+                    return suite, t
+        return None
 
     def find_custom_id(self, base: str) -> Optional[str]:
         """Side-loaded tests that override an SDK test get a '-custom' marker in their public_id.
@@ -480,12 +493,24 @@ class Harness:
                 continue
             try:
                 shutil.copyfile(src, dest)
-                self.cli_step(f"custom-{kind}-rescan-add", g, ["rescan-tests"])
+                _, rescan_out = self.cli_step(f"custom-{kind}-rescan-add", g, ["rescan-tests"])
                 self.load_live()
-                cid = self.find_custom_id(c["test"])
-                self.record(f"custom-{kind}-visible", g, PASS if cid else FAIL,
-                            f"{cid} listed after rescan" if cid else f"no custom variant of {c['test']} listed after rescan")
-                if cid:
+                hit = self.find_custom(c["test"])
+                cid = hit[1] if hit else None
+                if hit:
+                    self.record(f"custom-{kind}-visible", g, PASS, f"{hit[1]} in suite {hit[0]!r}")
+                else:
+                    cust = {s: sorted(t)[:5] for s, t in self.live.items() if s.lower().endswith("-custom")}
+                    self.record(f"custom-{kind}-visible", g, FAIL,
+                                f"no custom variant of {c['test']} after rescan\ncustom suites now: {cust}\n"
+                                f"rescan said: {rescan_out.strip()[-500:]}")
+                if hit and "custom" not in hit[1].lower():
+                    # Same id as the SDK test: `th-cli run-tests -t <id>` cannot say which one to run, so a
+                    # PASS here could silently be the SDK test. Refuse rather than report a false pass.
+                    self.record(f"custom-{kind}-run", g, NOT_RUN,
+                                f"custom id {hit[1]!r} is identical to the SDK test id; th-cli cannot select the "
+                                f"custom variant unambiguously")
+                elif cid:
                     eid = self.run_test(f"custom-{kind}-run", g, cid, "pass", [], c.get("dut"), "fresh")
                     if eid:
                         self.exec_ids[f"custom-{kind}"] = eid
@@ -494,7 +519,8 @@ class Harness:
                     os.remove(dest)
                 self.cli_step(f"custom-{kind}-rescan-remove", g, ["rescan-tests"])
                 self.load_live()
-                left = self.find_custom_id(c["test"])
+                left = self.find_custom(c["test"])
+                left = left[1] if left else None
                 self.record(f"custom-{kind}-removed", g, PASS if not left else FAIL,
                             "custom variant gone after removal + rescan" if not left else f"{left} STILL listed after removal + rescan")
 
@@ -504,7 +530,8 @@ class Harness:
         if self.dry_run:
             self.cli_step("execution-list", g, ["test-run-execution", "list", "--json"])
             return
-        eid = self.exec_ids.get("_nodut") or next(iter(self.exec_ids.values()), None)
+        target = next((k for k in self.exec_ids if k in self.exec_meta), None)
+        eid = self.exec_ids[target] if target else next(iter(self.exec_ids.values()), None)
         if not eid:
             self.record("executions", g, NOT_RUN, "no successful execution to operate on")
             return
@@ -513,7 +540,15 @@ class Harness:
         self.cli_step("execution-list", g, ["test-run-execution", "list", "--json"])
         self.cli_step("execution-show", g, ["test-run-execution", "list", "-i", i, "--json"])
         self.cli_step("execution-log", g, ["test-run-execution", "log", "-i", i, "-o", os.path.join(d, "exec_log.txt")])
-        self.cli_step("execution-pics-export", g, ["test-run-execution", "pics-export", "-i", i, "-o", os.path.join(d, "exec_pics")])
+        rc, out = self.cli(["test-run-execution", "pics-export", "-i", i, "-o", os.path.join(d, "exec_pics")])
+        if rc == 0:
+            self.record("execution-pics-export", g, PASS, "exported")
+        elif "No PICS were used" in out:  # a 404 with that exact reason is the documented answer for PICS-less runs
+            self.record("execution-pics-export", g, PASS, "endpoint answered 'No PICS were used' (expected for these runs); the export path itself is NOT exercised")
+        else:
+            self.record("execution-pics-export", g, FAIL, f"rc={rc}\n{out[-400:]}")
+        if self.project_id:  # needs executions in the project, so it cannot run in the smoke phase
+            self.cli_step("project-logs", g, ["project", "logs", "-i", str(self.project_id), "-o", os.path.join(d, "project_logs")])
         self.cli_step("execution-rename", g, ["test-run-execution", "rename", "-i", i, "-n", "sanity-renamed"])
         self.cli_step("execution-archive", g, ["test-run-execution", "archive", "-i", i])
         self.cli_step("execution-unarchive", g, ["test-run-execution", "unarchive", "-i", i])
@@ -524,16 +559,32 @@ class Harness:
             if self.cli_step("execution-import", g, imp)[0]:
                 for x in sorted(self.exec_set() - before):
                     self.cli_step(f"execution-delete-imported-{x}", g, ["test-run-execution", "delete", "-i", str(x), "-y"])
-        # repeat uses a no-DUT execution so no DUT state is needed
-        if "_nodut" in self.exec_ids:
+        # repeat re-runs the execution, so the DUT must be in the state the original run had
+        if target:
+            meta = self.exec_meta[target]
+            t0 = time.time()
             before = self.exec_set()
-            rc, out = self.cli(["test-run-execution", "repeat", "-i", str(self.exec_ids["_nodut"]), "--no-color", "--no-streaming"],
-                               timeout=self.m.get("default_run_timeout_s", 900))
-            self.record("execution-repeat", g, PASS if rc == 0 else FAIL, f"rc={rc}\n{out[-300:]}" if rc else "repeated")
+            ready = True
+            if meta.get("dut"):
+                try:
+                    self.dut.start(meta["dut"], fresh=True)
+                except DutError as e:
+                    ready = False
+                    self.record("execution-repeat", g, FAIL, f"INFRA: DUT did not start: {e}")
+            if ready:
+                print(f"      ... repeating execution {self.exec_ids[target]} ({target})", flush=True)
+                args = [self.th_cli, "test-run-execution", "repeat", "-i", str(self.exec_ids[target]), "--no-color", "--no-streaming"]
+                out, rc, why = self.pty_run(args, meta.get("prompt_answers", []) + self.m.get("default_prompt_answers", []),
+                                            self.m.get("default_run_timeout_s", 900),
+                                            transcript=os.path.join(d, "execution-repeat.out"), text_rules=meta.get("text_answers"))
+                bad = bool(why) or rc != 0
+                self.record("execution-repeat", g, FAIL if bad else PASS,
+                            (f"INFRA: {why}" if why else f"rc={rc}\n{out[-300:]}") if bad else f"repeated execution {self.exec_ids[target]}",
+                            time.time() - t0)
             for x in sorted(self.exec_set() - before):
                 self.cli_step(f"execution-delete-repeated-{x}", g, ["test-run-execution", "delete", "-i", str(x), "-y"])
         else:
-            self.record("execution-repeat", g, NOT_RUN, "no no-DUT execution available")
+            self.record("execution-repeat", g, NOT_RUN, "no passed suite execution to repeat")
 
     def exec_set(self) -> set:
         return {e.get("id") for e in items(self.cli_json(["test-run-execution", "list", "--json", "--all"]))}
