@@ -45,7 +45,7 @@ class DutManager:
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, profile: str, fresh: bool = True) -> None:
+    def start(self, profile: str, fresh: bool = True, log_dir: Optional[str] = None) -> None:
         """Start the DUT. Raises DutError if it is not ready (mDNS published) in time."""
         prof = self.profiles.get(profile)
         if prof is None:
@@ -56,8 +56,9 @@ class DutManager:
         binary = os.path.join(self.apps_dir, prof["binary"])
         if not os.access(binary, os.X_OK):
             raise DutError(f"DUT binary not found or not executable: {binary}")
-        os.makedirs(self.log_dir, exist_ok=True)
-        self.log_path = os.path.join(self.log_dir, f"dut_{profile}_{int(time.time())}.log")
+        target = log_dir or self.log_dir  # the step folder, so the DUT log sits next to the step's transcript
+        os.makedirs(target, exist_ok=True)
+        self.log_path = os.path.join(target, "dut.log")
         log = open(self.log_path, "w")
         self.proc = subprocess.Popen(
             [binary, *prof.get("args", [])], cwd=self.apps_dir, stdout=log, stderr=subprocess.STDOUT

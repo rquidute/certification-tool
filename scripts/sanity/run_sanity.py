@@ -120,9 +120,17 @@ class Harness:
         self.exec_ids: Dict[str, int] = {}  # step id -> execution id
         self.exec_meta: Dict[str, dict] = {}  # step id -> manifest entry that produced it
         self.live: Dict[str, set] = {}  # suite id -> test ids
-        os.makedirs(out_dir, exist_ok=True)
 
     # ---------- recording ----------
+    # <run dir>/<category>/<step id>/... : every step keeps its own artifacts (transcript, DUT log, th-cli run log, exports)
+    STEP_DIRS = {"suites": "suites", "custom": "custom", "cli": "cli", "executions": "cli", "coverage": "coverage",
+                 "cleanup": "cleanup", "harness": "harness"}
+
+    def step_dir(self, group: str, sid: str) -> str:
+        path = os.path.join(self.out_dir, self.STEP_DIRS.get(group, group), sid)
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def elapsed(self) -> str:
         s = int(time.time() - self.t0)
         return f"{s // 3600:d}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60:02d}:{s % 60:02d}"
@@ -263,7 +271,7 @@ class Harness:
         self.cli_step("project-update", g, ["project", "update", "-i", pid, "-n", name + "-renamed"])
         self.cli_step("project-edit", g, ["project", "edit", "-i", pid], env={"EDITOR": "true", "VISUAL": "true"})
         self.cli_step("project-applicable-tests", g, ["project", "applicable-tests", "-i", pid, "--json"])
-        exp = os.path.join(self.out_dir, "project_export.json")
+        exp = os.path.join(self.step_dir(g, "project-export"), "project_export.json")
         if self.cli_step("project-export", g, ["project", "export", "-i", pid, "-o", exp])[0]:
             before = {p.get("id") for p in items(self.cli_json(["project", "list", "--json"]))}
             if self.cli_step("project-import", g, ["project", "import", "-f", exp])[0]:
@@ -387,21 +395,26 @@ class Harness:
         if dut:
             print(paint(f"      … starting DUT '{dut}' ({dut_start})" if UNICODE else f"      ... starting DUT '{dut}' ({dut_start})", "gray"), flush=True)
             try:
-                self.dut.start(dut, fresh=(dut_start != "reuse"))
+                self.dut.start(dut, fresh=(dut_start != "reuse"), log_dir=self.step_dir(group, sid))
             except DutError as e:
                 self.record(sid, group, FAIL, f"INFRA: DUT did not start: {e}")
                 return None
             print(paint(f"      … DUT ready (log: {self.dut.log_path})" if UNICODE else f"      ... DUT ready (log: {self.dut.log_path})", "gray"), flush=True)
-        print(paint(f"      … running {test} (timeout {timeout}s, transcript: {self.out_dir}/{sid}.out)" if UNICODE
-                    else f"      ... running {test} (timeout {timeout}s, transcript: {self.out_dir}/{sid}.out)", "gray"), flush=True)
+        print(paint(f"      … running {test} (timeout {timeout}s, transcript: {self.step_dir(group, sid)}/transcript.out)" if UNICODE
+                    else f"      ... running {test} (timeout {timeout}s, transcript: {self.step_dir(group, sid)}/transcript.out)", "gray"), flush=True)
         args = [self.th_cli, "run-tests", "-t", test, "-n", f"sanity-{sid}", "--no-color", "--no-streaming"]
         if self.project_id:
             args += ["--project-id", str(self.project_id)]
         if config:
             args += ["-c", config]
         out, rc, why = self.pty_run(args, answers + self.m.get("default_prompt_answers", []), timeout,
-                                    transcript=os.path.join(self.out_dir, f"{sid}.out"), text_rules=text_answers)
+                                    transcript=os.path.join(self.step_dir(group, sid), "transcript.out"), text_rules=text_answers)
         log = (re.findall(r"Log output in:?\s*(\S+)", out) or [""])[-1]
+        if log and os.path.isfile(log):  # keep th-cli's own run log with the step it belongs to
+            try:
+                log = shutil.copy(log, os.path.join(self.step_dir(group, sid), "th-cli-run.log"))
+            except OSError:
+                pass
         results = (re.findall(r"(?m)^Results:\s*(.+)$", out) or [""])[-1]
         if dut and not self.dut.is_alive():
             why = why or "DUT process died during the run"
@@ -620,7 +633,7 @@ class Harness:
             if not placed:
                 return
             _, rescan_out = self.cli_step("custom-rescan-add", g, ["rescan-tests"], timeout=180)
-            rescan_file = os.path.join(self.out_dir, "custom-rescan-add.out")
+            rescan_file = os.path.join(self.step_dir(g, "rescan-add"), "rescan.out")
             with open(rescan_file, "w") as fh:
                 fh.write(rescan_out)
             self.load_live()
@@ -658,7 +671,9 @@ class Harness:
                 if os.path.exists(dest):
                     os.remove(dest)
             if placed:
-                self.cli_step("custom-rescan-remove", g, ["rescan-tests"], timeout=180)
+                _, out_rm = self.cli_step("custom-rescan-remove", g, ["rescan-tests"], timeout=180)
+                with open(os.path.join(self.step_dir(g, "rescan-remove"), "rescan.out"), "w") as fh:
+                    fh.write(out_rm)
                 self.load_live()
                 for f, _ in placed:
                     left = self.find_custom(f["test"], f.get("expect_suite"))
@@ -677,11 +692,11 @@ class Harness:
             self.record("executions", g, NOT_RUN, "no successful execution to operate on")
             return
         i = str(eid)
-        d = self.out_dir
+        sd = lambda name: self.step_dir(g, name)  # noqa: E731
         self.cli_step("execution-list", g, ["test-run-execution", "list", "--json"])
         self.cli_step("execution-show", g, ["test-run-execution", "list", "-i", i, "--json"])
-        self.cli_step("execution-log", g, ["test-run-execution", "log", "-i", i, "-o", os.path.join(d, "exec_log.txt")])
-        rc, out = self.cli(["test-run-execution", "pics-export", "-i", i, "-o", os.path.join(d, "exec_pics")])
+        self.cli_step("execution-log", g, ["test-run-execution", "log", "-i", i, "-o", os.path.join(sd("execution-log"), "exec_log.txt")])
+        rc, out = self.cli(["test-run-execution", "pics-export", "-i", i, "-o", os.path.join(sd("execution-pics-export"), "exec_pics")])
         if rc == 0:
             self.record("execution-pics-export", g, PASS, "exported")
         elif "No PICS were used" in out:  # a 404 with that exact reason is the documented answer for PICS-less runs
@@ -689,11 +704,11 @@ class Harness:
         else:
             self.record("execution-pics-export", g, FAIL, f"rc={rc}\n{out[-400:]}")
         if self.project_id:  # needs executions in the project, so it cannot run in the smoke phase
-            self.cli_step("project-logs", g, ["project", "logs", "-i", str(self.project_id), "-o", os.path.join(d, "project_logs")])
+            self.cli_step("project-logs", g, ["project", "logs", "-i", str(self.project_id), "-o", os.path.join(sd("project-logs"), "project_logs")])
         self.cli_step("execution-rename", g, ["test-run-execution", "rename", "-i", i, "-n", "sanity-renamed"])
         self.cli_step("execution-archive", g, ["test-run-execution", "archive", "-i", i])
         self.cli_step("execution-unarchive", g, ["test-run-execution", "unarchive", "-i", i])
-        exp = os.path.join(d, "exec_export.json")
+        exp = os.path.join(sd("execution-export"), "exec_export.json")
         if self.cli_step("execution-export", g, ["test-run-execution", "export", "-i", i, "-o", exp])[0]:
             imp = ["test-run-execution", "import", "-f", exp] + (["-p", str(self.project_id)] if self.project_id else [])
             before = self.exec_set()
@@ -708,7 +723,7 @@ class Harness:
             ready = True
             if meta.get("dut"):
                 try:
-                    self.dut.start(meta["dut"], fresh=True)
+                    self.dut.start(meta["dut"], fresh=True, log_dir=sd("execution-repeat"))
                 except DutError as e:
                     ready = False
                     self.record("execution-repeat", g, FAIL, f"INFRA: DUT did not start: {e}")
@@ -719,7 +734,7 @@ class Harness:
                 args = [self.th_cli, "test-run-execution", "repeat", "-i", str(orig), "--no-color", "--no-streaming"]
                 out, rc, why = self.pty_run(args, meta.get("prompt_answers", []) + self.m.get("default_prompt_answers", []),
                                             self.m.get("default_run_timeout_s", 900),
-                                            transcript=os.path.join(d, "execution-repeat.out"), text_rules=meta.get("text_answers"))
+                                            transcript=os.path.join(sd("execution-repeat"), "transcript.out"), text_rules=meta.get("text_answers"))
                 new_ids = sorted(self.exec_set() - before)
                 new_state = self.exec_state(new_ids[-1]) if new_ids else None
                 if why:
@@ -753,7 +768,7 @@ class Harness:
         if meta.get("dut"):
             try:
                 print(paint(f"      … starting DUT '{meta['dut']}' (fresh)", "gray"), flush=True)
-                self.dut.start(meta["dut"], fresh=True)
+                self.dut.start(meta["dut"], fresh=True, log_dir=self.step_dir(g, "abort-testing-running"))
             except DutError as e:
                 self.record("abort-testing-running", g, FAIL, f"INFRA: DUT did not start: {e}")
                 return
@@ -767,7 +782,7 @@ class Harness:
             result["out"], result["rc"], result["why"] = self.pty_run(
                 args, meta.get("prompt_answers", []) + self.m.get("default_prompt_answers", []),
                 self.m.get("default_run_timeout_s", 900),
-                transcript=os.path.join(self.out_dir, "abort-while-running.out"), text_rules=meta.get("text_answers"))
+                transcript=os.path.join(self.step_dir(g, "abort-testing-running"), "transcript.out"), text_rules=meta.get("text_answers"))
 
         t0 = time.time()
         th = threading.Thread(target=worker, daemon=True)
@@ -837,8 +852,9 @@ class Harness:
         fails = [s for s in self.steps if s["status"] == FAIL]
         unexpected = [s for s in self.steps if s["status"] == NOT_RUN and not s["id"].startswith("excluded-")]
         go = not fails and not unexpected
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = os.path.join(self.out_dir, f"sanity_{stamp}")
+        stamp = os.path.basename(self.out_dir)
+        os.makedirs(self.out_dir, exist_ok=True)
+        base = os.path.join(self.out_dir, "report")
         counts = {k: sum(1 for s in self.steps if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
         cats = self.by_category()
         lines = [f"# TH sanity report - {version}", "", f"- Date: {stamp}", f"- Total time: {self.elapsed()}",
@@ -876,7 +892,16 @@ class Harness:
                 print(f"  {paint(SYMBOL[s['status']], STATUS_COLOR[s['status']])} {s['group']}/{s['id']}  {paint(why, 'dim')}")
             print(rule)
         print(" " + (paint("  GO  ", "bold", "inv", "green") if go else paint("  NO-GO  ", "bold", "inv", "red")))
+        latest = os.path.join(os.path.dirname(os.path.abspath(self.out_dir)), "latest")
+        try:  # convenience pointer to the newest run folder
+            if os.path.islink(latest):
+                os.remove(latest)
+            if not os.path.exists(latest):
+                os.symlink(os.path.basename(os.path.abspath(self.out_dir)), latest)
+        except OSError:
+            pass
         print(f"Report: {base}.md")
+        print(f"Logs:   {self.out_dir}/{{suites,custom,cli}}/<step>/")
         return 0 if go else 1
 
 
@@ -916,7 +941,9 @@ def main() -> int:
     USE_COLOR = a.color == "always" or (a.color == "auto" and sys.stdout.isatty() and "NO_COLOR" not in os.environ)
     with open(a.manifest) as f:
         manifest = json.load(f)
-    h = Harness(manifest, os.path.dirname(os.path.abspath(a.manifest)), a.out_dir, a.dry_run)
+    label = re.sub(r"[^A-Za-z0-9._+-]+", "-", a.version_label).strip("-")
+    run_dir = os.path.join(a.out_dir, "sanity_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + (f"_{label}" if label else ""))
+    h = Harness(manifest, os.path.dirname(os.path.abspath(a.manifest)), run_dir, a.dry_run)
     if a.list_suites:
         if not h.load_live():
             print(h.steps[-1]["detail"])
