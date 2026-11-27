@@ -1,0 +1,86 @@
+"""Shared state and services for one sanity run. Phases receive a Session and never touch globals."""
+import os
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from .dut import DutError, DutManager
+from .prompts import PromptDriver
+from .results import FAIL, PASS, Results
+from .thcli import ThCli
+
+# <run dir>/<category>/<step id>/... : every step keeps its own artifacts (transcript, DUT log, th-cli run log, exports)
+STEP_DIRS = {"suites": "suites", "custom": "custom", "cli": "cli", "executions": "cli", "coverage": "coverage",
+             "cleanup": "cleanup", "harness": "harness"}
+
+
+class Session:
+    def __init__(self, manifest: dict, manifest_dir: str, out_dir: str, dry_run: bool = False,
+                 th: Optional[ThCli] = None, dut: Optional[DutManager] = None,
+                 prompts: Optional[PromptDriver] = None) -> None:
+        self.m = manifest
+        self.manifest_dir = manifest_dir
+        self.out_dir = out_dir
+        self.dry_run = dry_run
+        self.th_root = os.path.expanduser(manifest.get("th_root", "~/certification-tool"))
+        self.results = Results()
+        self.th = th or ThCli(manifest.get("th_cli", "th-cli"))
+        self.dut = dut or DutManager(manifest.get("dut_profiles", {}), manifest.get("apps_dir", "~/apps"), out_dir)
+        self.prompts = prompts or PromptDriver(self.th, self.results, self.dut)
+        # state shared between phases
+        self.project_id: Optional[int] = None
+        self.extra_projects: List[int] = []
+        self.exec_ids: Dict[str, int] = {}  # step id -> execution id of a passed run
+        self.exec_meta: Dict[str, dict] = {}  # step id -> manifest entry that produced it
+        self.live: Dict[str, set] = {}  # suite public_id -> test public_ids currently in the TH
+
+    # ---- files
+    def step_dir(self, group: str, sid: str) -> str:
+        path = os.path.join(self.out_dir, STEP_DIRS.get(group, group), sid)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def abs_path(self, p: Optional[str]) -> Optional[str]:
+        return os.path.join(self.manifest_dir, p) if p and not os.path.isabs(p) else p
+
+    # ---- manifest helpers
+    @property
+    def run_timeout(self) -> int:
+        return self.m.get("default_run_timeout_s", 900)
+
+    def prompt_rules(self, entry: dict) -> List[dict]:
+        """Step-specific answers first, then the manifest-wide defaults."""
+        return entry.get("prompt_answers", []) + self.m.get("default_prompt_answers", [])
+
+    def custom_fixtures(self) -> List[dict]:
+        fx = self.m.get("custom", [])
+        if isinstance(fx, dict):  # older manifest layout: {"yaml": {...}, "python": {...}}
+            fx = [{"id": k, **v} for k, v in fx.items()]
+        return fx
+
+    # ---- recording shortcuts
+    def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "") -> str:
+        return self.results.record(sid, group, status, detail, dur, log)
+
+    def cli_step(self, sid: str, group: str, args: List[str], ok_rc: Tuple[int, ...] = (0,), env: Optional[dict] = None,
+                 must_contain: str = "", timeout: int = 120) -> Tuple[bool, str]:
+        """Run one th-cli command as a recorded step. Passes when the exit code is allowed and the output contains
+        `must_contain`."""
+        t0 = time.time()
+        rc, out = self.th.run(args, timeout=timeout, env=env)
+        good = rc in ok_rc and (must_contain in out)
+        why = "" if good else f"rc={rc}" + (f", missing {must_contain!r}" if must_contain not in out else "")
+        self.record(sid, group, PASS if good else FAIL, why + "\n" + out[-400:] if not good else "th-cli " + " ".join(args),
+                    time.time() - t0)
+        return good, out
+
+    # ---- DUT
+    def start_dut(self, profile: str, fresh: bool, step_dir: str) -> Optional[str]:
+        """Start the DUT with its log in the step folder. Returns None on success, else the failure text."""
+        from . import console
+        console.note(f"starting DUT '{profile}' ({'fresh' if fresh else 'reuse'})")
+        try:
+            self.dut.start(profile, fresh=fresh, log_dir=step_dir)
+        except DutError as e:
+            return str(e)
+        console.note(f"DUT ready (log: {self.dut.log_path}; {self.dut.ready_how})")
+        return None
