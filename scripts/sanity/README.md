@@ -171,7 +171,7 @@ sanity_reports/
     ├── report.md                                        summary by category + "Needs attention"
     ├── report.json                                      same data, machine readable
     ├── suites/run-yaml-chip-tool/
-    │   ├── transcript.out                               what th-cli printed, written live
+    │   ├── transcript.out                               "$ <th-cli command>" first, then what th-cli printed, live
     │   ├── dut.log                                      the DUT app's log for this step
     │   └── th-cli-run.log                               th-cli's own run log, copied from ./run_logs
     ├── custom/custom-rescan-add/cli-output.txt          full rescan output
@@ -183,7 +183,8 @@ sanity_reports/
 Every step that runs a `th-cli` command (CLI commands, rescans, project and execution commands, cleanup deletes,
 the abort request) keeps `cli-output.txt` in its folder: the command line (shell-quoted, so it can be pasted back),
 the exit code, the duration and the **full** output, not the 400 characters shown on the console when a step fails.
-Test runs keep `transcript.out` instead. Internal read-only queries that are not steps (e.g. polling the runner state)
+Test runs keep `transcript.out` instead; its first line is the command (`$ th-cli run-tests -t … `), followed by a
+`# DUT started with: …` line when the test had a DUT, a blank line and then the live output. Internal read-only queries that are not steps (e.g. polling the runner state)
 are not saved.
 
 Every step also records **the command line it ran** (shell-quoted, so it can be pasted back) and, for tests, **how the

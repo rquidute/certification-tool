@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -24,6 +25,11 @@ def items(obj: Any) -> List[dict]:
             if isinstance(obj.get(key), list):
                 return obj[key]
     return []
+
+
+def shell_join(parts: List[str]) -> str:
+    """A command line that can be pasted back into a shell."""
+    return " ".join(shlex.quote(p) for p in parts)
 
 
 def enum_name(value: Any) -> Optional[str]:

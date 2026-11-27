@@ -76,7 +76,8 @@ def _repeat(s: Session, g: str, target, sdir: str) -> None:
     args = [s.th.binary, "test-run-execution", "repeat", "-i", str(orig), "--no-color", "--no-streaming"]
     rec = {"command": shell_join(args), "dut_command": getattr(s.dut, "last_command", "") if meta.get("dut") else ""}
     out, rc, why = s.prompts.run(args, s.prompt_rules(meta), s.run_timeout,
-                                 transcript=os.path.join(sdir, "transcript.out"), text_rules=meta.get("text_answers"))
+                                 transcript=os.path.join(sdir, "transcript.out"), text_rules=meta.get("text_answers"),
+                                 transcript_notes=[f"DUT started with: {rec['dut_command']}"] if rec["dut_command"] else None)
     new_ids = sorted(s.th.exec_set() - before)
     new_state = s.th.exec_state(new_ids[-1]) if new_ids else None
     if why:

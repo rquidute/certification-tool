@@ -76,6 +76,22 @@ class Driver(unittest.TestCase):
         self.assertIn("Results: 1 passed", out)
         self.assertFalse(self.th.called("abort-testing"))
 
+    def test_transcript_starts_with_the_command_then_notes_then_the_output(self):
+        transcript = os.path.join(self.tmp, "t.out")
+        args = self.script('echo "hello from th-cli"')
+        self.driver.run(args, [], 20, idle=2, transcript=transcript, transcript_notes=["DUT started with: /apps/x --wifi"])
+        lines = open(transcript).read().splitlines()
+        self.assertEqual(lines[0], "$ bash " + args[1])
+        self.assertEqual(lines[1], "# DUT started with: /apps/x --wifi")
+        self.assertEqual(lines[2], "")
+        self.assertIn("hello from th-cli", lines[3:])
+
+    def test_the_command_header_is_not_part_of_the_returned_output(self):
+        out, _, _ = self.driver.run(self.script('echo only-this'), [], 20, idle=2,
+                                    transcript=os.path.join(self.tmp, "t.out"))
+        self.assertNotIn("$ bash", out)
+        self.assertIn("only-this", out)
+
     def test_nonzero_exit_is_reported_not_hidden(self):
         _, rc, why = self.driver.run(self.script("echo hi; exit 3"), [], 20, idle=2)
         self.assertEqual((rc, why), (3, ""))

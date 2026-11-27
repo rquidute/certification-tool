@@ -37,8 +37,9 @@ class FakePrompts:
         self.result = result
         self.calls: List[dict] = []
 
-    def run(self, args, rules, timeout, idle=180, transcript=None, text_rules=None):
-        self.calls.append({"args": args, "rules": rules, "timeout": timeout, "transcript": transcript})
+    def run(self, args, rules, timeout, idle=180, transcript=None, text_rules=None, transcript_notes=None):
+        self.calls.append({"args": args, "rules": rules, "timeout": timeout, "transcript": transcript,
+                           "notes": transcript_notes})
         return self.result
 
 

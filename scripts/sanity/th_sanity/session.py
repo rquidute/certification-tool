@@ -1,22 +1,16 @@
 """Shared state and services for one sanity run. Phases receive a Session and never touch globals."""
 import os
-import shlex
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .dut import DutError, DutManager
 from .prompts import PromptDriver
 from .results import FAIL, PASS, Results
-from .thcli import ThCli
+from .thcli import ThCli, shell_join  # noqa: F401  (shell_join is re-exported for the phases)
 
 # <run dir>/<category>/<step id>/... : every step keeps its own artifacts (transcript, DUT log, th-cli run log, exports)
 STEP_DIRS = {"suites": "suites", "custom": "custom", "cli": "cli", "executions": "cli", "coverage": "coverage",
              "cleanup": "cleanup", "harness": "harness"}
-
-
-def shell_join(parts: List[str]) -> str:
-    """A command line that can be pasted back into a shell."""
-    return " ".join(shlex.quote(p) for p in parts)
 
 
 CLI_OUTPUT = "cli-output.txt"  # the command, its exit code and its full output, one per CLI step

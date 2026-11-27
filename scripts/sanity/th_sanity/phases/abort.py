@@ -40,12 +40,13 @@ def run(s: Session) -> None:
     def rec(*a, **k):
         return s.record(*a, command=cmd, dut_command=dcmd, **k)
 
+    transcript = os.path.join(sdir, "transcript.out")
     result: Dict[str, Any] = {}
 
     def worker() -> None:
         result["out"], result["rc"], result["why"] = s.prompts.run(
-            args, s.prompt_rules(meta), s.run_timeout, transcript=os.path.join(sdir, "transcript.out"),
-            text_rules=meta.get("text_answers"))
+            args, s.prompt_rules(meta), s.run_timeout, transcript=transcript,
+            text_rules=meta.get("text_answers"), transcript_notes=[f"DUT started with: {dcmd}"] if dcmd else None)
 
     t0 = time.time()
     th = threading.Thread(target=worker, daemon=True)
@@ -69,6 +70,10 @@ def run(s: Session) -> None:
     rec(STEP, G, PASS if rc == 0 else FAIL,
              f"abort accepted: {out.strip()[-100:]}" if rc == 0 else f"rc={rc}\n{out.strip()[-300:]}", time.time() - t0)
     th.join(timeout=120)
+    if not th.is_alive():  # the run's writer is done, so appending cannot interleave with its output
+        with open(transcript, "a") as f:
+            f.write(f"\n# abort request, sent while the run above was in progress:\n"
+                    f"$ {shell_join([s.th.binary, 'abort-testing'])}\n{out}" + ("" if out.endswith("\n") else "\n"))
     s.record("run-ends-after-abort", G, PASS if not th.is_alive() else FAIL,
              "th-cli exited after the abort" if not th.is_alive() else "th-cli still running 120s after the abort")
     idle, st = s.th.wait_state("idle", 60)

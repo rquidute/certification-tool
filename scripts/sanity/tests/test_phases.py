@@ -384,6 +384,12 @@ class Abort(unittest.TestCase):
         self.assertEqual(ids(s, PASS), ["abort-testing-running", "run-ends-after-abort", "runner-idle-after-abort",
                                         "execution-cancelled-after-abort"])
 
+    def test_the_abort_request_is_appended_to_the_transcript_after_the_run(self):
+        s = self.session()
+        abort.run(s)
+        text = open(os.path.join(s.out_dir, "cli", "abort-testing-running", "transcript.out")).read()
+        self.assertIn("# abort request, sent while the run above was in progress:\n$ th-cli abort-testing\nAborting testing.", text)
+
     def test_a_test_that_finishes_before_the_abort_is_reported_not_passed(self):
         s = self.session(instant=True)
         abort.run(s)
@@ -519,6 +525,14 @@ class CommandLines(unittest.TestCase):
         self.assertEqual(step["command"], "th-cli run-tests -t TC-ACE-1.1 -n sanity-run-x --no-color --no-streaming "
                                           "--project-id 15 -c /m/cfg.json")
         self.assertEqual(step["dut_command"], "/home/u/apps/d-app --wifi")
+
+    def test_transcript_notes_carry_the_dut_command_only_when_there_is_a_dut(self):
+        prompts = FakePrompts(("Results: 1 passed\n", 0, ""))
+        s = make_session(prompts=prompts)
+        run_test(s, "a", "suites", "TC-1", "pass", [], "d", "fresh")
+        run_test(s, "b", "suites", "TC-1", "pass", [], None, "fresh")
+        self.assertEqual(prompts.calls[0]["notes"], ["DUT started with: /home/u/apps/d-app --wifi"])
+        self.assertIsNone(prompts.calls[1]["notes"])
 
     def test_a_test_without_a_dut_has_no_dut_command(self):
         s = make_session(prompts=FakePrompts(("Results: 1 passed\n", 0, "")))

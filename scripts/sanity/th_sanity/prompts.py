@@ -15,7 +15,7 @@ import time
 from typing import List, Optional, Tuple
 
 from . import console
-from .thcli import ThCli, strip
+from .thcli import ThCli, shell_join, strip
 
 PROMPT_TRIGGER = "Please enter a number for an option above"
 FILE_PROMPT = re.compile(r"Enter the path to the file to upload \(or press Enter to skip\):\s*$")
@@ -77,13 +77,17 @@ class PromptDriver:
         return value
 
     def run(self, args: List[str], rules: List[dict], timeout: int, idle: int = 180,
-            transcript: Optional[str] = None, text_rules: Optional[List[dict]] = None) -> Tuple[str, int, str]:
+            transcript: Optional[str] = None, text_rules: Optional[List[dict]] = None,
+            transcript_notes: Optional[List[str]] = None) -> Tuple[str, int, str]:
         """Returns (output, exit code, reason). A non-empty reason means the run did not end by itself
         (unhandled prompt, timeout, idle); the backend run is then aborted so the next step is not blocked."""
         master, slave = pty.openpty()
         proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
         os.close(slave)
         tfile = open(transcript, "w") if transcript else None
+        if tfile:  # first line: the command that was run; then notes such as how the DUT was started
+            tfile.write(f"$ {shell_join(args)}\n" + "".join(f"# {n}\n" for n in (transcript_notes or [])) + "\n")
+            tfile.flush()
         buf, since_answer = "", 0
         start = last = beat = time.time()
         why, clean = "", False

@@ -34,7 +34,8 @@ def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: 
         args += ["-c", config]
     cmd, dut_cmd = shell_join(args), (getattr(s.dut, "last_command", "") if dut else "")
     out, rc, why = s.prompts.run(args, answers + s.m.get("default_prompt_answers", []), timeout,
-                                 transcript=os.path.join(sdir, "transcript.out"), text_rules=text_answers)
+                                 transcript=os.path.join(sdir, "transcript.out"), text_rules=text_answers,
+                                 transcript_notes=[f"DUT started with: {dut_cmd}"] if dut_cmd else None)
     log = (re.findall(r"Log output in:?\s*(\S+)", out) or [""])[-1]
     if log and os.path.isfile(log):  # keep th-cli's own run log with the step it belongs to
         try:
