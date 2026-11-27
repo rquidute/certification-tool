@@ -225,17 +225,22 @@ class Harness:
         t0 = time.time()
         timeout = timeout or self.m.get("default_run_timeout_s", 900)
         if dut:
+            print(f"      ... starting DUT '{dut}' ({dut_start})", flush=True)
             try:
                 self.dut.start(dut, fresh=(dut_start != "reuse"))
             except DutError as e:
                 self.record(sid, group, FAIL, f"INFRA: DUT did not start: {e}")
                 return None
+            print(f"      ... DUT ready (log: {self.dut.log_path})", flush=True)
+        print(f"      ... running {test} (timeout {timeout}s, transcript: {self.out_dir}/{sid}.out)", flush=True)
         args = [self.th_cli, "run-tests", "-t", test, "-n", f"sanity-{sid}", "--no-color", "--no-streaming"]
         if self.project_id:
             args += ["--project-id", str(self.project_id)]
         if config:
             args += ["-c", config]
         out, rc, why = self.pty_run(args, answers + self.m.get("default_prompt_answers", []), timeout)
+        with open(os.path.join(self.out_dir, f"{sid}.out"), "w") as f:
+            f.write(out)
         log = (re.findall(r"Log output in:?\s*(\S+)", out) or [""])[-1]
         results = (re.findall(r"(?m)^Results:\s*(.+)$", out) or [""])[-1]
         if dut and not self.dut.is_alive():
@@ -257,7 +262,7 @@ class Harness:
         proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
         os.close(slave)
         buf, since_answer = "", 0
-        start = last = time.time()
+        start = last = beat = time.time()
         why = ""
         while True:
             r, _, _ = select.select([master], [], [], 1.0)
@@ -285,6 +290,10 @@ class Harness:
             if time.time() - last > idle:
                 why = f"no output for {idle}s (waiting on an unknown prompt?)"
                 break
+            if time.time() - beat > 30:
+                beat = time.time()
+                tail = next((ln.strip() for ln in reversed(buf.splitlines()) if ln.strip()), "(no output yet)")
+                print(f"      ... {int(beat - start)}s elapsed, last output: {tail[:100]}", flush=True)
         if proc.poll() is None:
             proc.kill()
         proc.wait()
