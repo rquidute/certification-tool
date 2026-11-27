@@ -64,6 +64,8 @@ def bar(done: int, total: int, width: int = 12) -> str:
     full, empty = ("█", "░") if UNICODE else ("#", "-")
     return paint(full * filled, "green") + paint(empty * (width - filled), "gray")
 # th-cli text prompts end with 'Enter value: ' or 'Enter value [default: x]: ' and no newline
+# th-cli file-upload prompt (printed with a trailing newline). Pressing Enter skips the upload.
+FILE_PROMPT = re.compile(r"Enter the path to the file to upload \(or press Enter to skip\):\s*$")
 TEXT_PROMPT = re.compile(r"Enter value(?: \[default: [^\]]*\])?: $")
 BASE38 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-."
 
@@ -459,7 +461,10 @@ class Harness:
                         if cli_log is None:
                             m = re.search(r"Log output in:?\s*(\S+)", buf)
                             cli_log = m.group(1) if m else None
-                        if TEXT_PROMPT.search(buf[since_answer:]):
+                        if FILE_PROMPT.search(buf[since_answer:]):
+                            os.write(master, b"\n")  # skip the upload
+                            since_answer = len(buf)
+                        elif TEXT_PROMPT.search(buf[since_answer:]):
                             block = buf[since_answer:]
                             ans = next((self.resolve_text(r_["value"]) for r_ in (text_rules or [])
                                         if re.search(r_["match"], block)), None)
@@ -489,7 +494,9 @@ class Harness:
                     why = f"timeout after {timeout}s"
                     break
                 if time.time() - last > idle:
-                    why = f"no th-cli output and no log growth for {idle}s (waiting on an unknown prompt?)"
+                    lastlines = "\n".join([ln for ln in buf.splitlines() if ln.strip()][-8:])
+                    why = (f"no th-cli output and no log growth for {idle}s (waiting on a prompt the harness does not "
+                           f"recognise?). Last output:\n{lastlines}")
                     break
                 if time.time() - beat > 30:
                     beat = time.time()
