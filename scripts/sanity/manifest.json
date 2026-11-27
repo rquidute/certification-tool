@@ -25,6 +25,7 @@
      "depends_on": "python-old-format",
      "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^yes$"}]}
   ],
+  "abort_run": {"from": "python-auto-commissioning", "after_s": 8},
   "excluded": [
     {"suite": "FirstAppSuite", "reason": "Simulated YAML (DUT is chip-app run by the TH); needs an external controller to commission it, not automatable here"},
     {"suite": "FirstManualSuite", "reason": "Manual tests require a human"}

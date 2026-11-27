@@ -29,6 +29,7 @@ import select
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -179,6 +180,27 @@ class Harness:
         except json.JSONDecodeError:
             return None
 
+    def runner_state(self) -> Optional[str]:
+        """idle | loading | ready | running (test-runner-status --json), None if unreadable."""
+        d = self.cli_json(["test-runner-status", "--json"])
+        return str(d.get("state")).lower() if isinstance(d, dict) and d.get("state") is not None else None
+
+    def wait_state(self, want: str, timeout: int, stop: Optional[threading.Thread] = None) -> Tuple[bool, Optional[str]]:
+        deadline, st = time.time() + timeout, None
+        while time.time() < deadline:
+            st = self.runner_state()
+            if st == want:
+                return True, st
+            if stop is not None and not stop.is_alive():
+                return False, st
+            time.sleep(1)
+        return False, st
+
+    def exec_state(self, eid: int) -> Optional[str]:
+        d = self.cli_json(["test-run-execution", "list", "-i", str(eid), "--json"])
+        row = d if isinstance(d, dict) and "state" in d else (items(d)[0] if items(d) else {})
+        return str(row.get("state")).lower() if row.get("state") is not None else None
+
     # ---------- 1. CLI smoke ----------
     def smoke(self) -> None:
         g = "cli"
@@ -209,8 +231,17 @@ class Harness:
                 after = {p.get("id") for p in items(self.cli_json(["project", "list", "--json"]))}
                 self.extra_projects += sorted(x for x in after - before if x is not None)
         self.cli_step("rescan-tests", g, ["rescan-tests"])
-        # With nothing running the CLI must refuse, and say why. Accepting any failure would hide real errors.
-        self.cli_step("abort-testing-idle-refused", g, ["abort-testing"], ok_rc=(1,), must_contain="not active")
+        # Idle engine: abort must be refused (409 "not active") and the engine must stay idle. The state is
+        # checked first so this step can never abort a run that somebody else started.
+        st = self.runner_state()
+        if st != "idle":
+            self.record("runner-idle-before-abort", g, FAIL, f"runner state is {st!r}, not 'idle': a test run is active, "
+                        "finish or abort it before running the sanity harness")
+        else:
+            self.record("runner-idle-before-abort", g, PASS, "test-runner-status: idle")
+            self.cli_step("abort-testing-idle-refused", g, ["abort-testing"], ok_rc=(1,), must_contain="not active")
+            after = self.runner_state()
+            self.record("runner-still-idle-after-abort", g, PASS if after == "idle" else FAIL, f"state after refused abort: {after!r}")
 
     def find_project(self, name: str) -> Optional[int]:
         for p in items(self.cli_json(["project", "list", "--json"])):
@@ -599,19 +630,96 @@ class Harness:
                     ready = False
                     self.record("execution-repeat", g, FAIL, f"INFRA: DUT did not start: {e}")
             if ready:
-                print(paint(f"      … repeating execution {self.exec_ids[target]} ({target})", "gray"), flush=True)
-                args = [self.th_cli, "test-run-execution", "repeat", "-i", str(self.exec_ids[target]), "--no-color", "--no-streaming"]
+                orig = self.exec_ids[target]
+                orig_state = self.exec_state(orig)
+                print(paint(f"      … repeating execution {orig} ({target}, state {orig_state})", "gray"), flush=True)
+                args = [self.th_cli, "test-run-execution", "repeat", "-i", str(orig), "--no-color", "--no-streaming"]
                 out, rc, why = self.pty_run(args, meta.get("prompt_answers", []) + self.m.get("default_prompt_answers", []),
                                             self.m.get("default_run_timeout_s", 900),
                                             transcript=os.path.join(d, "execution-repeat.out"), text_rules=meta.get("text_answers"))
-                bad = bool(why) or rc != 0
-                self.record("execution-repeat", g, FAIL if bad else PASS,
-                            (f"INFRA: {why}" if why else f"rc={rc}\n{out[-300:]}") if bad else f"repeated execution {self.exec_ids[target]}",
-                            time.time() - t0)
+                new_ids = sorted(self.exec_set() - before)
+                new_state = self.exec_state(new_ids[-1]) if new_ids else None
+                if why:
+                    self.record("execution-repeat", g, FAIL, f"INFRA: {why}", time.time() - t0)
+                elif not new_ids:
+                    self.record("execution-repeat", g, FAIL, f"rc={rc}, but no new execution was created\n{out[-300:]}", time.time() - t0)
+                elif new_state != orig_state:
+                    self.record("execution-repeat", g, FAIL,
+                                f"execution {new_ids[-1]} ended {new_state!r}, original {orig} was {orig_state!r}", time.time() - t0)
+                else:
+                    self.record("execution-repeat", g, PASS,
+                                f"execution {orig} repeated as {new_ids[-1]}, both {new_state!r}", time.time() - t0)
             for x in sorted(self.exec_set() - before):
                 self.cli_step(f"execution-delete-repeated-{x}", g, ["test-run-execution", "delete", "-i", str(x), "-y"])
         else:
             self.record("execution-repeat", g, NOT_RUN, "no passed suite execution to repeat")
+
+    def abort_running(self) -> None:
+        g = "cli"
+        cfg = self.m.get("abort_run")
+        if not cfg:
+            return
+        meta = next((s for s in self.m["suites"] if s["id"] == cfg["from"]), None)
+        if self.dry_run:
+            self.record("abort-testing-running", g, NOT_RUN, "dry-run")
+            return
+        if not meta or "TODO" in (meta["suite"], meta["test"]):
+            self.record("abort-testing-running", g, NOT_RUN, f"manifest entry {cfg['from']!r} missing or has TODO")
+            return
+        self.progress = "abort while running"
+        if meta.get("dut"):
+            try:
+                print(paint(f"      … starting DUT '{meta['dut']}' (fresh)", "gray"), flush=True)
+                self.dut.start(meta["dut"], fresh=True)
+            except DutError as e:
+                self.record("abort-testing-running", g, FAIL, f"INFRA: DUT did not start: {e}")
+                return
+        before = self.last_execution() or 0
+        args = [self.th_cli, "run-tests", "-t", meta["test"], "-n", "sanity-abort-while-running", "--no-color", "--no-streaming"]
+        if self.project_id:
+            args += ["--project-id", str(self.project_id)]
+        result: Dict[str, Any] = {}
+
+        def worker() -> None:
+            result["out"], result["rc"], result["why"] = self.pty_run(
+                args, meta.get("prompt_answers", []) + self.m.get("default_prompt_answers", []),
+                self.m.get("default_run_timeout_s", 900),
+                transcript=os.path.join(self.out_dir, "abort-while-running.out"), text_rules=meta.get("text_answers"))
+
+        t0 = time.time()
+        th = threading.Thread(target=worker, daemon=True)
+        th.start()
+        running, st = self.wait_state("running", 90, stop=th)
+        if not running:
+            self.record("abort-testing-running", g, FAIL,
+                        f"runner never reached 'running' (last state {st!r}); the run "
+                        f"{'ended first' if not th.is_alive() else 'is stuck'}: {str(result.get('why') or result.get('out', ''))[-300:]}",
+                        time.time() - t0)
+            th.join(timeout=5)
+            return
+        time.sleep(cfg.get("after_s", 8))  # let the test get properly under way
+        if not th.is_alive():
+            self.record("abort-testing-running", g, FAIL,
+                        f"test finished before the abort was sent; pick a longer test in abort_run.from "
+                        f"(after_s={cfg.get('after_s', 8)})", time.time() - t0)
+            return
+        rc, out = self.cli(["abort-testing"], timeout=60)
+        ok = rc == 0
+        self.record("abort-testing-running", g, PASS if ok else FAIL,
+                    f"abort accepted: {out.strip()[-100:]}" if ok else f"rc={rc}\n{out.strip()[-300:]}", time.time() - t0)
+        th.join(timeout=120)
+        self.record("run-ends-after-abort", g, PASS if not th.is_alive() else FAIL,
+                    "th-cli exited after the abort" if not th.is_alive() else "th-cli still running 120s after the abort")
+        idle, st = self.wait_state("idle", 60)
+        self.record("runner-idle-after-abort", g, PASS if idle else FAIL,
+                    "runner back to idle" if idle else f"runner still {st!r} 60s after the abort")
+        eid = self.last_execution()
+        if eid and eid > before:
+            state = self.exec_state(eid)
+            self.record("execution-cancelled-after-abort", g, PASS if state and "cancel" in state else FAIL,
+                        f"execution {eid} state: {state!r} (expected 'cancelled')")
+        else:
+            self.record("execution-cancelled-after-abort", g, FAIL, "no new execution was recorded for the aborted run")
 
     def exec_set(self) -> set:
         return {e.get("id") for e in items(self.cli_json(["test-run-execution", "list", "--json", "--all"]))}
@@ -722,8 +830,9 @@ def main() -> int:
         h.run_suites()
         h.phase(4, "Custom tests (YAML + Python)")
         h.custom()
-        h.phase(5, "CLI commands on executions")
+        h.phase(5, "CLI commands on executions and runs")
         h.executions()
+        h.abort_running()
     except KeyboardInterrupt:
         h.record("interrupted", "harness", FAIL, "interrupted by user")
     finally:
