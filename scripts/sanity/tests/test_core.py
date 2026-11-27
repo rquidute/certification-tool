@@ -338,6 +338,42 @@ class RealHostProcessList(unittest.TestCase):
         self.assertNotIn(527273, [pid for pid, _ in m.find_running()])
 
 
+# `th-cli --version` as printed on the TH host
+VERSION_OUTPUT = """th-cli: A CLI tool for Matter Test Harness
+
+Version: 0.1.0
+CLI SHA: d53ca722
+version: v2.16-beta3+winter2026
+sha: 4606147-local
+sdk_sha: 5741ad7
+sdk_docker_tag: 5741ad7fa624f34bb032eb6a955485f4ad0ed253
+db_revision: b7e2f1a9c3d4
+"""
+
+
+class TestHarnessVersion(unittest.TestCase):
+    def test_the_th_version_is_the_backend_line_not_the_cli_line(self):
+        from th_sanity.versions import describe, parse_versions
+        v = parse_versions(VERSION_OUTPUT)
+        self.assertEqual(v["th"], "v2.16-beta3+winter2026")
+        self.assertEqual(v["cli"], "0.1.0")
+        self.assertEqual(describe(v), "v2.16-beta3+winter2026 (sha 4606147-local, SDK 5741ad7)")
+
+    def test_unreadable_output_is_reported_as_unknown(self):
+        from th_sanity.versions import describe, parse_versions
+        self.assertEqual(parse_versions("Not able to retrieve versions from server"), {})
+        self.assertIn("unknown", describe({}))
+
+    def test_a_label_must_not_claim_another_version(self):
+        from th_sanity.versions import label_matches
+        th = "v2.16-beta3+winter2026"
+        self.assertFalse(label_matches("v2.17-beta1", th))       # the mislabelled run
+        self.assertTrue(label_matches("v2.16-beta3", th))
+        self.assertTrue(label_matches("2.16-beta3+winter2026", th))
+        self.assertTrue(label_matches("v2.17-beta1", "v2.17-beta1+spring2027"))
+        self.assertFalse(label_matches("", th))
+
+
 class ResultsVerdict(unittest.TestCase):
     def test_not_run_without_an_exclusion_is_no_go(self):
         r = Results()

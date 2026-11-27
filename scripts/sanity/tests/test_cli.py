@@ -70,6 +70,78 @@ class StartupSafety(unittest.TestCase):
         code, _, _ = self.main("--yes", running=[])
         self.assertEqual(code, 0)
 
+    def run_main(self, version_text, *args):
+        """cli.main with `th-cli --version` returning version_text and no phases, so only the start-up logic runs."""
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err), \
+                mock.patch.object(cli, "PHASES", []), mock.patch.object(cli.preclean, "preclean"), \
+                mock.patch.object(DutManager, "find_running", return_value=[]), \
+                mock.patch.object(ThCli, "run", return_value=(0, version_text)):
+            code = cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--yes", "--color", "never", *args])
+        report = json.load(open(os.path.join(self.out, sorted(os.listdir(self.out))[-1], "report.json")))
+        return code, out.getvalue(), report
+
+    def test_a_label_that_does_not_match_the_th_under_test_fails_the_run(self):
+        from test_core import VERSION_OUTPUT
+        code, out, report = self.run_main(VERSION_OUTPUT, "--version-label", "v2.17-beta1")
+        self.assertEqual(code, 1)
+        step = next(s for s in report["steps"] if s["id"] == "th-version-matches-label")
+        self.assertEqual(step["status"], "FAIL")
+        self.assertIn("v2.17-beta1", step["detail"])
+        self.assertIn("v2.16-beta3+winter2026", step["detail"])
+        self.assertEqual(report["th_versions"]["th"], "v2.16-beta3+winter2026")
+        self.assertIn("TH under test: v2.16-beta3+winter2026 (sha 4606147-local, SDK 5741ad7)", out)
+
+    def test_a_matching_label_or_no_label_is_fine_and_the_real_version_is_in_the_report(self):
+        from test_core import VERSION_OUTPUT
+        code, _, report = self.run_main(VERSION_OUTPUT, "--version-label", "v2.16-beta3")
+        self.assertEqual(code, 0)
+        self.assertFalse(any(s["id"] == "th-version-matches-label" for s in report["steps"]))
+        code, _, report = self.run_main(VERSION_OUTPUT)
+        self.assertEqual((code, report["version"]), (0, "v2.16-beta3+winter2026"))
+
+    def test_an_unreadable_version_does_not_fail_a_labelled_run(self):
+        code, _, report = self.run_main("", "--version-label", "v2.17-beta1")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["th_versions"], {})
+
+    def test_only_rejects_unknown_ids_and_lists_the_valid_ones(self):
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            code = cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--yes", "--only", "nope"])
+        self.assertEqual(code, 2)
+        self.assertIn("nope", err.getvalue())
+
+    def test_only_runs_the_focused_phase_creates_a_project_and_is_marked_not_a_release_verdict(self):
+        seen = {}
+        with open(self.manifest) as f:
+            m = json.load(f)
+        m["suites"] = [{"id": "a", "suite": "S", "test": "T"}, {"id": "b", "suite": "S", "test": "T", "depends_on": "a"},
+                       {"id": "c", "suite": "S", "test": "T"}]
+        json.dump(m, open(self.manifest, "w"))
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                mock.patch.object(cli.preclean, "preclean"), mock.patch.object(DutManager, "find_running", return_value=[]), \
+                mock.patch.object(ThCli, "run", return_value=(0, "")), \
+                mock.patch.object(cli.cli_commands, "create_project",
+                                  side_effect=lambda s: (seen.setdefault("project", True), setattr(s, "project_id", 1))), \
+                mock.patch.object(cli.suites, "run", side_effect=lambda s: seen.setdefault("only", set(s.only))):
+            cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--yes", "--only", "b", "--color", "never"])
+        self.assertEqual(seen["only"], {"a", "b"})  # b depends on a; c is not run
+        self.assertTrue(seen["project"])
+        report = json.load(open(os.path.join(self.out, sorted(os.listdir(self.out))[-1], "report.json")))
+        self.assertEqual(report["focused"], ["a", "b"])
+        self.assertIn("NOT a release verdict", open(os.path.join(self.out, sorted(os.listdir(self.out))[-1], "report.md")).read())
+
+    def test_a_focused_run_does_nothing_when_the_project_cannot_be_created(self):
+        ran = []
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                mock.patch.object(cli.preclean, "preclean"), mock.patch.object(DutManager, "find_running", return_value=[]), \
+                mock.patch.object(ThCli, "run", return_value=(0, "")), \
+                mock.patch.object(cli.cli_commands, "create_project"), \
+                mock.patch.object(cli.suites, "run", side_effect=lambda s: ran.append(1)):
+            cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--yes", "--only", "a", "--color", "never"])
+        self.assertEqual(ran, [])
+
     def test_dry_run_neither_refuses_nor_stops(self):
         code, _, _ = self.main("--dry-run", running=self.RUNNING)
         self.assertEqual(code, 0)

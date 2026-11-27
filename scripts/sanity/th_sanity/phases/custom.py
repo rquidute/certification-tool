@@ -90,6 +90,6 @@ def _check_one(s: Session, f: dict, rescan_file: str) -> None:
     else:
         s.results.progress = f"custom {sid}"
         eid = run_test(s, f"custom-{sid}-run", g, hit[1], f.get("expect", "pass"), f.get("prompt_answers", []),
-                       f.get("dut"), "fresh", text_answers=f.get("text_answers"))
+                       f.get("dut"), "fresh", text_answers=f.get("text_answers"), test_args=f.get("test_args"))
         if eid:
             s.exec_ids[f"custom-{sid}"] = eid

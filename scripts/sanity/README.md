@@ -118,6 +118,7 @@ manifest against the live TH without running anything.
 | `--list-suites` | print live suites (id, size, sample test ids) and exit; creates no folder |
 | `--yes` | skip the "close the TH UI" confirmation (unattended runs; without a terminal it is required) |
 | `--kill-existing` | allow the harness to stop a DUT app that is already running (otherwise it refuses to start) |
+| `--only ID[,ID...]` | **focused run** for iterating on a failing suite: runs only those `suites[]` entries (plus the entries they `depends_on`) in a throwaway project and skips the CLI, custom and execution phases. The report is marked *not a release verdict*. Example: `--only python-mandatories` |
 | `--no-preclean` | do not delete leftover `sanity-*` projects from earlier sessions |
 | `--color auto\|always\|never` | colour output; `auto` = only on a terminal and when `NO_COLOR` is unset. Use `always` with `tee`, then `less -R` |
 
@@ -155,6 +156,12 @@ does not abandon the remaining cleanup steps.
 * **NOT_RUN**: it did not run. This makes the verdict **NO-GO** unless the step id starts with `excluded-`
   (an explicit, reasoned exclusion in the manifest).
 * **GO** = no FAIL and no unexplained NOT_RUN.
+* **Exit code 0 is not enough for a pass.** `th-cli` exits 0 when nothing failed, which includes a test that was skipped or
+  not applicable. A test only passes if the `Results:` summary says `passed`; anything else is reported as
+  "exit code 0 but no test passed".
+* **The label must match the TH.** The report records what `th-cli --version` says the TH under test is (backend version,
+  sha, SDK sha). If `--version-label` is given and does not match that version, the step `th-version-matches-label`
+  fails, because the report would claim a version that was not tested.
 * `th-cli` returns exit code 1 for both "a test failed" and "infrastructure error", so the harness tells them apart:
   a `Results:` line means the test ran; none means infrastructure (reported as `INFRA: …`).
 
@@ -269,6 +276,7 @@ neither reported nor killed.
 | `expect` | `pass` (default) or `fail` (a test that is *supposed* to fail) |
 | `depends_on` | another entry `id`; skipped (`NOT_RUN`) if that one did not pass |
 | `prompt_answers`, `text_answers` | answers for this step only, tried before the defaults |
+| `test_args` | inline test parameters appended to `th-cli run-tests` after `--`, e.g. `["--int-arg", "PIXIT.CGEN.TCRevision:1"]`. Needed by tests that read PIXIT values; the SDK script's own header comment lists the values its CI uses |
 | `config` | optional run-config file (path relative to the manifest), passed as `-c` |
 
 A suite missing from `suites` **and** `excluded` fails the coverage gate. Entries still containing `TODO` fail it too.
@@ -299,7 +307,7 @@ An SDK test is copied into the custom folder to exercise the matching `<suite>-c
 | `src`, `dest_dir` | file to copy and the custom folder (`{th_root}` is expanded) |
 | `test` | the test's id (matched loosely: punctuation and case ignored) |
 | `expect_suite` | suite it must appear in after the rescan, e.g. `Python Testing Suite - Auto commissioning-custom` |
-| `dut`, `prompt_answers`, `text_answers`, `expect` | as for suites |
+| `dut`, `prompt_answers`, `text_answers`, `test_args`, `expect` | as for suites |
 | `run: false`, `run_note` | only check that it loads (used for the simulated YAML suite) |
 
 User `…-custom` suites that already exist (the user's own side-loaded files) count as exercised when a fixture
@@ -431,12 +439,26 @@ the factory-reset `wipe` is disabled in tests, so they never touch a real app or
 * **Hardware-dependent suites** (BLE, Thread, Wi-Fi, NFC pairing) cannot run against a plain all-clusters app.
   Exclude them with a reason; they will show as `NOT_RUN`, never as PASS. The simulated YAML suite (`FirstAppSuite`)
   needs an external controller to commission the chip-app and is excluded the same way.
-* **Custom YAML tests are probably not picked up by `th-cli rescan-tests`.** `support/yaml_tests/__init__.py` builds the
-  custom YAML collection once, at import time, and a rescan only re-imports already-loaded modules. The user guide says
-  no restart is needed for side-loaded tests. The three YAML custom fixtures fail until this is fixed (or the guide is
-  corrected); the failure message says so. This is a suspected product bug, not proven.
+* **`th-cli rescan-tests` does not pick up custom YAML tests (observed on TH v2.16-beta3+winter2026).** After copying three
+  YAML files into the custom folder, the rescan reported 5 collections, no Custom YAML collection, and listed only the
+  `.py` files under "Custom files". The code explains it: `support/yaml_tests/__init__.py` builds the custom YAML
+  collection once, when the module is imported, and a rescan only re-imports already-loaded modules. The user guide's
+  side-load steps cover "Yaml or Python" scripts and say no backend restart is needed. The three YAML custom fixtures
+  fail until this is fixed or the guide is corrected; the failure message says so.
 * **`execution-pics-export`** passes on the documented 404 "No PICS were used"; the export path itself is then **not
   exercised** (the step detail says so).
+* **TC-DD-1.1 errors on this TH with `'Settings' object has no attribute 'ENABLE_CONTAINER_LOGS'`** right after the QR code
+  is entered (the harness answers with the DUT's real code). On `release/v2.16-beta3+winter2026` that setting exists
+  (`config.py`) and `container_manager.py` reads it; commit `fed8dd8` (#414) removed both on the v2.17 work. The error
+  means the running backend has the reader without the setting, i.e. mixed v2.16 / v2.17 code or a stale image. Check
+  the deployment (`th-cli --version`, the backend image, the checkout) before blaming the test.
+* **TC_IDM_10_2 fails with "Problems with conformance"** on `chip-all-clusters-app`: it is the device conformance test, it
+  runs correctly, and the all-clusters app is not meant to be conformant. It is a poor representative for the Mandatories
+  suite on this DUT; pick another test from that suite (`--only python-mandatories` makes trying candidates quick).
+* **TC_CGEN_2_5 needs PIXIT parameters** (`PIXIT.CGEN.FailsafeExpiryLengthSeconds`, `RequiredTCAcknowledgements`,
+  `TCRevision`); without them it dies with a `KeyError`. The manifest now passes them with `test_args`. Whether the
+  all-clusters app supports Terms and Conditions (and whether the project's PICS enable `CGEN.S.F00`) is not known; a skipped
+  test is reported as FAIL, not as a pass.
 * **File-upload prompts are always skipped.** A manual test that needs a real file will fail visibly.
 * **Reuse readiness** was confirmed on the Pi: a device that kept its fabric announces `_matter._tcp`, not
   `_matterc._udp`. If a reuse start ever fails, read that step's `dut.log` (the quiet-log fallback exists for other builds).

@@ -610,10 +610,90 @@ class FailureDigest(unittest.TestCase):
         self.assertIn("Step 2: read attribute [FAILED]", detail)
 
     def test_a_passing_or_expected_failure_gets_no_digest(self):
-        for rc, expect in ((0, "pass"), (1, "fail")):
-            s = make_session(prompts=FakePrompts((self.OUT, rc, "")))
+        for rc, expect, out in ((0, "pass", self.OUT.replace("1 failed", "1 passed")), (1, "fail", self.OUT)):
+            s = make_session(prompts=FakePrompts((out, rc, "")))
             run_test(s, "run-x", "suites", "TC-1", expect, [], None, "fresh")
             self.assertNotIn("failing lines", s.results.steps[0]["detail"])
+
+
+class NotAPass(unittest.TestCase):
+    """th-cli exits 0 when nothing failed, which includes skipped / not applicable tests."""
+
+    def outcome(self, results, rc=0, expect="pass"):
+        s = make_session(prompts=FakePrompts((f"Results: {results}\n", rc, "")))
+        run_test(s, "run-x", "suites", "TC-1", expect, [], None, "fresh")
+        return s.results.steps[0]
+
+    def test_exit_code_zero_with_a_passed_test_is_a_pass(self):
+        self.assertEqual(self.outcome("1 passed")["status"], PASS)
+
+    def test_exit_code_zero_without_a_passed_test_is_not_a_pass(self):
+        for summary in ("1 not_applicable", "1 cancelled", ""):
+            step = self.outcome(summary)
+            self.assertEqual(step["status"], FAIL, summary)
+            self.assertIn("not a pass", step["detail"])
+
+    def test_a_failing_run_is_still_a_failure_and_an_expected_failure_still_passes(self):
+        self.assertEqual(self.outcome("1 failed", rc=1)["status"], FAIL)
+        self.assertEqual(self.outcome("1 failed", rc=1, expect="fail")["status"], PASS)
+
+    def test_a_skipped_test_never_satisfies_expect_fail_either(self):
+        self.assertEqual(self.outcome("1 not_applicable", expect="fail")["status"], FAIL)
+
+
+class TestArgs(unittest.TestCase):
+    ARGS = ["--int-arg", "PIXIT.CGEN.TCRevision:1", "--int-arg", "PIXIT.CGEN.RequiredTCAcknowledgements:1"]
+
+    def test_inline_test_parameters_go_after_a_double_dash_at_the_end(self):
+        prompts = FakePrompts(("Results: 1 passed\n", 0, ""))
+        s = make_session(prompts=prompts)
+        s.project_id = 7
+        run_test(s, "run-x", "suites", "TC_CGEN_2_5", "pass", [], None, "fresh", config="/m/c.json", test_args=self.ARGS)
+        args = prompts.calls[0]["args"]
+        self.assertEqual(args[args.index("--"):], ["--", *self.ARGS])
+        self.assertLess(args.index("-c"), args.index("--"))
+        self.assertLess(args.index("--project-id"), args.index("--"))
+        self.assertIn("-- --int-arg PIXIT.CGEN.TCRevision:1", s.results.steps[0]["command"])
+
+    def test_no_test_args_means_no_double_dash(self):
+        prompts = FakePrompts(("Results: 1 passed\n", 0, ""))
+        run_test(make_session(prompts=prompts), "run-x", "suites", "TC-1", "pass", [], None, "fresh")
+        self.assertNotIn("--", prompts.calls[0]["args"])
+
+    def test_suites_and_custom_fixtures_forward_their_test_args(self):
+        s = make_session(suites=[{"id": "a", "suite": "S", "test": "T", "dut": None, "test_args": self.ARGS}])
+        with mock.patch.object(suites, "run_test", return_value=None) as rt:
+            rt.side_effect = lambda s_, sid, *a, **k: s_.record(sid, "suites", PASS)
+            suites.run(s)
+        self.assertEqual(rt.call_args.kwargs["test_args"], self.ARGS)
+
+    def test_the_shipped_manifest_gives_tc_cgen_2_5_its_pixit_parameters(self):
+        m = json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "manifest.json")))
+        entry = next(e for e in m["suites"] if e["test"] == "TC_CGEN_2_5")
+        names = [a.split(":")[0] for a in entry["test_args"] if a != "--int-arg"]
+        self.assertEqual(sorted(names), ["PIXIT.CGEN.FailsafeExpiryLengthSeconds", "PIXIT.CGEN.RequiredTCAcknowledgements",
+                                         "PIXIT.CGEN.TCRevision"])
+
+
+class OnlyFilter(unittest.TestCase):
+    ENTRIES = [{"id": "a", "suite": "S", "test": "T", "dut": None}, {"id": "b", "suite": "S", "test": "T", "dut": None},
+               {"id": "c", "suite": "S", "test": "T", "dut": None, "depends_on": "a"}]
+
+    def test_only_the_chosen_entries_run(self):
+        s = make_session(suites=self.ENTRIES)
+        s.only = {"b"}
+        ran = []
+        with mock.patch.object(suites, "run_test", side_effect=lambda s_, sid, *a, **k: (ran.append(sid), s_.record(sid, "suites", PASS))[0]):
+            suites.run(s)
+        self.assertEqual(ran, ["run-b"])
+        self.assertEqual([x["id"] for x in s.results.steps], ["run-b"])  # the others are not even recorded
+
+    def test_without_only_everything_runs(self):
+        s = make_session(suites=self.ENTRIES)
+        ran = []
+        with mock.patch.object(suites, "run_test", side_effect=lambda s_, sid, *a, **k: (ran.append(sid), s_.record(sid, "suites", PASS))[0]):
+            suites.run(s)
+        self.assertEqual(ran, ["run-a", "run-b", "run-c"])
 
 
 class Report(unittest.TestCase):

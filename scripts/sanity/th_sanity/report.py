@@ -6,6 +6,7 @@ from . import console
 from .console import SYMBOL, STATUS_COLOR, paint
 from .results import FAIL, NOT_RUN, PASS, STATUSES, counts
 from .session import Session
+from .versions import describe
 
 
 def _command_cell(step: dict) -> str:
@@ -20,8 +21,9 @@ def _command_cell(step: dict) -> str:
 
 def _markdown(s: Session, version: str, go: bool, fails, unexpected) -> str:
     cats = s.results.by_category()
+    mode = "DRY RUN" if s.dry_run else ("FOCUSED (--only " + ", ".join(sorted(s.only)) + "): NOT a release verdict" if s.only else "FULL")
     lines = [f"# TH sanity report - {version}", "", f"- Date: {os.path.basename(s.out_dir)}",
-             f"- Total time: {s.results.elapsed()}", f"- Mode: {'DRY RUN' if s.dry_run else 'FULL'}",
+             f"- TH under test: {describe(s.versions)}", f"- Total time: {s.results.elapsed()}", f"- Mode: {mode}",
              f"- **Verdict: {'GO' if go else 'NO-GO'}**", f"- Live suites: {len(s.live)}", "",
              "## Summary by category", "", "| Category | PASS | FAIL | NOT_RUN |", "|---|---|---|---|"]
     for c, st in cats.items():
@@ -58,7 +60,8 @@ def _print_summary(s: Session, go: bool, fails, unexpected) -> None:
             why = (step["detail"].splitlines() or [""])[0][:90]
             print(f"  {paint(SYMBOL[step['status']], STATUS_COLOR[step['status']])} {step['group']}/{step['id']}  {paint(why, 'dim')}")
         print(rule)
-    print(" " + (paint("  GO  ", "bold", "inv", "green") if go else paint("  NO-GO  ", "bold", "inv", "red")))
+    print(" " + (paint("  GO  ", "bold", "inv", "green") if go else paint("  NO-GO  ", "bold", "inv", "red"))
+          + (paint("   focused run: not a release verdict", "yellow") if s.only else ""))
 
 
 def _point_latest_at(out_dir: str) -> None:
@@ -81,8 +84,8 @@ def write_report(s: Session, version: str) -> int:
     with open(base + ".md", "w") as f:
         f.write(_markdown(s, version, go, fails, unexpected))
     with open(base + ".json", "w") as f:
-        json.dump({"version": version, "verdict": "GO" if go else "NO-GO", "counts": counts(s.results.steps),
-                   "steps": s.results.steps}, f, indent=2)
+        json.dump({"version": version, "th_versions": s.versions, "focused": sorted(s.only) if s.only else None,
+                   "verdict": "GO" if go else "NO-GO", "counts": counts(s.results.steps), "steps": s.results.steps}, f, indent=2)
     _print_summary(s, go, fails, unexpected)
     _point_latest_at(s.out_dir)
     print(f"Report: {base}.md")

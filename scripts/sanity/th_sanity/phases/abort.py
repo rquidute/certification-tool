@@ -34,6 +34,8 @@ def run(s: Session) -> None:
     args = [s.th.binary, "run-tests", "-t", meta["test"], "-n", "sanity-abort-while-running", "--no-color", "--no-streaming"]
     if s.project_id:
         args += ["--project-id", str(s.project_id)]
+    if meta.get("test_args"):
+        args += ["--", *meta["test_args"]]
     cmd = shell_join(args) + "   # then aborted with: " + shell_join([s.th.binary, "abort-testing"])
     dcmd = getattr(s.dut, "last_command", "") if meta.get("dut") else ""
 

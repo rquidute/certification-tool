@@ -18,12 +18,8 @@ def run(s: Session) -> None:
     s.cli_step("project-list", g, ["project", "list", "--json"])
     if s.dry_run:
         return
-    name = f"sanity-harness-{int(time.time())}"
-    good, _ = s.cli_step("project-create", g, ["project", "create", "-n", name])
-    if good:
-        s.project_id = s.th.find_project(name)
+    name = create_project(s)
     if s.project_id is None:
-        s.record("project-id-lookup", g, FAIL, f"could not find project {name!r} in `project list --json`")
         return
     pid = str(s.project_id)
     s.cli_step("project-update", g, ["project", "update", "-i", pid, "-n", name + "-renamed"])
@@ -37,6 +33,18 @@ def run(s: Session) -> None:
             s.extra_projects += sorted(x for x in after - before if x is not None)
     s.cli_step("rescan-tests", g, ["rescan-tests"])
     _abort_when_idle(s, g)
+
+
+def create_project(s: Session) -> str:
+    """Create the throwaway project every test run is attached to; sets s.project_id (None if it failed)."""
+    g = "cli"
+    name = f"sanity-harness-{int(time.time())}"
+    good, _ = s.cli_step("project-create", g, ["project", "create", "-n", name])
+    if good:
+        s.project_id = s.th.find_project(name)
+    if s.project_id is None:
+        s.record("project-id-lookup", g, FAIL, f"could not find project {name!r} in `project list --json`")
+    return name
 
 
 def _abort_when_idle(s: Session, g: str) -> None:

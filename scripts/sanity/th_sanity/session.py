@@ -35,6 +35,8 @@ class Session:
         self.exec_ids: Dict[str, int] = {}  # step id -> execution id of a passed run
         self.exec_meta: Dict[str, dict] = {}  # step id -> manifest entry that produced it
         self.live: Dict[str, set] = {}  # suite public_id -> test public_ids currently in the TH
+        self.versions: Dict[str, str] = {}  # parsed `th-cli --version`: the TH under test
+        self.only: Optional[set] = None  # --only: ids of the suite entries to run (None = all)
 
     # ---- files
     def step_dir(self, group: str, sid: str) -> str:

@@ -10,7 +10,7 @@ from ..session import Session
 
 def run(s: Session) -> None:
     done: Dict[str, str] = {}
-    entries = s.m["suites"]
+    entries = [e for e in s.m["suites"] if s.only is None or e["id"] in s.only]
     total = len(entries)
     durations: List[float] = []
     t_prev = time.time()
@@ -38,7 +38,7 @@ def run(s: Session) -> None:
         n = len(s.results.steps)
         eid = run_test(s, f"run-{sid}", "suites", e["test"], e.get("expect", "pass"), e.get("prompt_answers", []),
                        e.get("dut"), e.get("dut_start", "fresh"), config=s.abs_path(e.get("config")),
-                       text_answers=e.get("text_answers"))
+                       text_answers=e.get("text_answers"), test_args=e.get("test_args"))
         done[sid] = s.results.steps[-1]["status"] if len(s.results.steps) > n else FAIL
         if eid and done[sid] == PASS:
             s.exec_ids[sid] = eid

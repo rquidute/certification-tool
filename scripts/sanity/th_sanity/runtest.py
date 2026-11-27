@@ -13,7 +13,7 @@ from .session import Session, shell_join
 
 def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: List[dict], dut: Optional[str],
              dut_start: str, config: Optional[str] = None, timeout: Optional[int] = None,
-             text_answers: Optional[List[dict]] = None) -> Optional[int]:
+             text_answers: Optional[List[dict]] = None, test_args: Optional[List[str]] = None) -> Optional[int]:
     """Start the DUT (if the test needs one), run `test`, record PASS/FAIL, return the new execution id.
 
     A step passes only when th-cli finished by itself and the outcome (pass/fail) equals `expect`.
@@ -32,6 +32,8 @@ def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: 
         args += ["--project-id", str(s.project_id)]
     if config:
         args += ["-c", config]
+    if test_args:  # inline test parameters, e.g. ["--int-arg", "PIXIT.CGEN.TCRevision:1"]
+        args += ["--", *test_args]
     cmd, dut_cmd = shell_join(args), (getattr(s.dut, "last_command", "") if dut else "")
     out, rc, why = s.prompts.run(args, answers + s.m.get("default_prompt_answers", []), timeout,
                                  transcript=os.path.join(sdir, "transcript.out"), text_rules=text_answers,
@@ -53,8 +55,12 @@ def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: 
         s.record(sid, group, FAIL, f"INFRA: rc={rc}, no Results line\n{out[-400:]}", time.time() - t0, log,
                  command=cmd, dut_command=dut_cmd)
         return s.th.last_execution()
-    actual = "pass" if rc == 0 else "fail"
+    # th-cli exits 0 when nothing failed, which includes a test that was skipped or not applicable.
+    # That is not a pass: it needs an actual 'passed' in the summary.
+    actual = "fail" if rc != 0 else ("pass" if re.search(r"\bpassed\b", results) else "none")
     detail = f"{test}: {results or 'no results line'} (expected {expect}, got {actual})"
+    if actual == "none":
+        detail += "\nexit code 0 but no test passed: a skipped / not applicable test is not a pass"
     if actual != expect:  # say WHY on the console and in the report, not only that it failed
         digest = failure_digest(out)
         if digest:

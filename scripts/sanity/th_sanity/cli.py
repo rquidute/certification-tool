@@ -30,6 +30,7 @@ from typing import List, Optional, Tuple
 from . import console
 from .console import paint
 from .dut import DutError
+from .versions import describe, label_matches, parse_versions
 from .phases import abort, cli_commands, coverage, custom, executions, preclean, suites
 from .report import write_report
 from .results import FAIL
@@ -43,6 +44,15 @@ PHASES = [
     ("Custom tests (YAML + Python)", custom.run),
     ("CLI commands on executions and runs", lambda s: (executions.run(s), abort.run(s))),
 ]
+
+
+def _focused(s: Session) -> None:
+    """--only: create the throwaway project, then run just the chosen suite entries."""
+    if not s.dry_run:
+        cli_commands.create_project(s)
+        if s.project_id is None:
+            return
+    suites.run(s)
 
 
 def confirm_start(existing: Optional[List[Tuple[int, str]]] = None) -> bool:
@@ -77,6 +87,9 @@ def build_parser(default_manifest: str) -> argparse.ArgumentParser:
     ap.add_argument("--yes", action="store_true", help="skip the 'close the TH UI' confirmation (unattended runs)")
     ap.add_argument("--kill-existing", action="store_true",
                     help="stop a DUT app (e.g. chip-all-clusters-app) that is already running instead of refusing to start")
+    ap.add_argument("--only", default="", metavar="ID[,ID...]",
+                    help="focused run: only these suites[] entries (plus the entries they depend on); skips the CLI, custom and "
+                         "execution phases, so it is NOT a release verdict. Use it to iterate on a failing suite")
     ap.add_argument("--no-preclean", action="store_true", help="do not delete leftover sanity projects from earlier sessions")
     ap.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                     help="colored output (auto = only on a terminal and when NO_COLOR is not set)")
@@ -93,6 +106,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     label = re.sub(r"[^A-Za-z0-9._+-]+", "-", a.version_label).strip("-")
     run_dir = os.path.join(a.out_dir, "sanity_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + (f"_{label}" if label else ""))
     s = Session(manifest, os.path.dirname(os.path.abspath(a.manifest)), run_dir, a.dry_run)
+
+    if a.only:
+        wanted = [x.strip() for x in a.only.split(",") if x.strip()]
+        known = {e["id"]: e for e in manifest["suites"]}
+        bad = [x for x in wanted if x not in known]
+        if bad:
+            print(f" Unknown suite entry id(s) for --only: {', '.join(bad)}\n Valid ids: {', '.join(known)}", file=sys.stderr)
+            return 2
+        chosen, queue = set(), list(wanted)
+        while queue:  # an entry that depends on another needs it to run first
+            sid = queue.pop()
+            if sid not in chosen:
+                chosen.add(sid)
+                if known[sid].get("depends_on"):
+                    queue.append(known[sid]["depends_on"])
+        s.only = chosen
 
     if a.list_suites:
         if not coverage.load_live(s):
@@ -126,14 +155,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(paint("Cancelled. Nothing was changed.", "yellow"))
             return 2
 
-    version = a.version_label or s.th.run(["--version"])[1].strip().replace("\n", " ")[:200]
+    # The TH under test, as the TH itself reports it. A label is only a name; it must not claim another version.
+    s.versions = parse_versions(s.th.run(["--version"])[1])
+    version = a.version_label or s.versions.get("th", "unknown")
+    print(f"\n TH under test: {paint(describe(s.versions), 'bold')}" + (f"   (label: {a.version_label})" if a.version_label else ""))
     try:
         if existing:
             preclean.stop_existing_dut(s, existing)
+        if a.version_label and "th" in s.versions and not label_matches(a.version_label, s.versions["th"]):
+            s.record("th-version-matches-label", "harness", FAIL,
+                     f"the label says {a.version_label!r} but the TH under test reports {s.versions['th']!r}. "
+                     "Either the label is wrong or the wrong TH build is deployed; this report would be mislabelled")
         if not a.no_preclean:
             preclean.preclean(s)
-        for n, (title, fn) in enumerate(PHASES, 1):
-            s.results.phase(n, title, len(PHASES))
+        phases = PHASES if s.only is None else [("Focused: " + ", ".join(sorted(s.only)), _focused)]
+        for n, (title, fn) in enumerate(phases, 1):
+            s.results.phase(n, title, len(phases))
             fn(s)
     except KeyboardInterrupt:
         s.record("interrupted", "harness", FAIL, "interrupted by user")
