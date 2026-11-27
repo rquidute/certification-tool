@@ -38,6 +38,26 @@ from dut import DutError, DutManager  # noqa: E402
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PASS, FAIL, NOT_RUN = "PASS", "FAIL", "NOT_RUN"
 PROMPT_TRIGGER = "Please enter a number for an option above"
+
+# ---- console styling (standard library only). Auto-off when not a terminal or when NO_COLOR is set.
+USE_COLOR = False
+UNICODE = (getattr(sys.stdout, "encoding", "") or "").lower().startswith("utf")
+_CODES = {"bold": "1", "dim": "2", "inv": "7", "red": "31", "green": "32", "yellow": "33", "cyan": "36", "gray": "90"}
+SYMBOL = {"PASS": "✔" if UNICODE else "+", "FAIL": "✘" if UNICODE else "x", "NOT_RUN": "○" if UNICODE else "-"}
+LABEL = {"PASS": "PASS", "FAIL": "FAIL", "NOT_RUN": "SKIP"}
+STATUS_COLOR = {"PASS": "green", "FAIL": "red", "NOT_RUN": "yellow"}
+
+
+def paint(text: str, *styles: str) -> str:
+    if not USE_COLOR or not styles:
+        return text
+    return "\033[" + ";".join(_CODES[s] for s in styles) + "m" + text + "\033[0m"
+
+
+def bar(done: int, total: int, width: int = 12) -> str:
+    filled = int(width * done / total) if total else 0
+    full, empty = ("█", "░") if UNICODE else ("#", "-")
+    return paint(full * filled, "green") + paint(empty * (width - filled), "gray")
 # th-cli text prompts end with 'Enter value: ' or 'Enter value [default: x]: ' and no newline
 TEXT_PROMPT = re.compile(r"Enter value(?: \[default: [^\]]*\])?: $")
 BASE38 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-."
@@ -102,22 +122,28 @@ class Harness:
 
     def tally(self) -> str:
         c = {k: sum(1 for s in self.steps if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
-        return f"ok {c[PASS]} fail {c[FAIL]} skip {c[NOT_RUN]}"
+        return "  ".join(paint(f"{SYMBOL[k]} {c[k]}", STATUS_COLOR[k] if c[k] else "gray") for k in (PASS, FAIL, NOT_RUN))
+
+    def stamp(self) -> str:
+        return paint(f"[{self.elapsed()}]", "gray")
 
     def phase(self, n: int, name: str) -> None:
         self.phase_name = f"phase {n}/5 {name}"
-        print(f"\n[{self.elapsed()}] ===== Phase {n}/5: {name} ({self.tally()}) =====", flush=True)
+        print(f"\n{self.stamp()} " + paint(f"Phase {n}/5", "bold", "cyan") + f" {bar(n - 1, 5, 10)} "
+              + paint(name, "bold") + "   " + self.tally(), flush=True)
 
     def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "") -> str:
         self.steps.append({"id": sid, "group": group, "status": status, "detail": detail.strip()[-1500:],
                            "duration_s": round(dur, 1), "log": log})
-        mark = {"PASS": "ok  ", "FAIL": "FAIL", "NOT_RUN": "skip"}[status]
-        took = f" ({dur:.0f}s)" if dur >= 1 else ""
+        badge = paint(f"{SYMBOL[status]} {LABEL[status]}", "bold", STATUS_COLOR[status])
+        took = paint(f" ({dur:.0f}s)", "gray") if dur >= 1 else ""
         lines = detail.strip().splitlines()
-        print(f"[{self.elapsed()}] [{mark}] {group}/{sid}{took} {lines[0][:100] if lines else ''}", flush=True)
+        first = lines[0][:100] if lines else ""
+        print(f"{self.stamp()} {badge} {paint(group + '/', 'gray')}{paint(sid, 'bold')}{took} "
+              f"{paint(first, 'dim') if status != FAIL else first}", flush=True)
         if status == FAIL:  # show why right away instead of only in the report
             for ln in lines[1:15]:
-                print(f"           | {ln[:140]}", flush=True)
+                print(paint("           │ " if UNICODE else "           | ", "red") + paint(ln[:140], "dim"), flush=True)
         return status
 
     # ---------- th-cli plumbing ----------
@@ -282,14 +308,15 @@ class Harness:
         t0 = time.time()
         timeout = timeout or self.m.get("default_run_timeout_s", 900)
         if dut:
-            print(f"      ... starting DUT '{dut}' ({dut_start})", flush=True)
+            print(paint(f"      … starting DUT '{dut}' ({dut_start})" if UNICODE else f"      ... starting DUT '{dut}' ({dut_start})", "gray"), flush=True)
             try:
                 self.dut.start(dut, fresh=(dut_start != "reuse"))
             except DutError as e:
                 self.record(sid, group, FAIL, f"INFRA: DUT did not start: {e}")
                 return None
-            print(f"      ... DUT ready (log: {self.dut.log_path})", flush=True)
-        print(f"      ... running {test} (timeout {timeout}s, transcript: {self.out_dir}/{sid}.out)", flush=True)
+            print(paint(f"      … DUT ready (log: {self.dut.log_path})" if UNICODE else f"      ... DUT ready (log: {self.dut.log_path})", "gray"), flush=True)
+        print(paint(f"      … running {test} (timeout {timeout}s, transcript: {self.out_dir}/{sid}.out)" if UNICODE
+                    else f"      ... running {test} (timeout {timeout}s, transcript: {self.out_dir}/{sid}.out)", "gray"), flush=True)
         args = [self.th_cli, "run-tests", "-t", test, "-n", f"sanity-{sid}", "--no-color", "--no-streaming"]
         if self.project_id:
             args += ["--project-id", str(self.project_id)]
@@ -393,8 +420,8 @@ class Harness:
                     beat = time.time()
                     tail = (cli_log and self.file_tail(cli_log)) or next(
                         (ln.strip() for ln in reversed(buf.splitlines()) if ln.strip()), "(no output yet)")
-                    print(f"      [{self.elapsed()}] {self.progress} | step {int(beat - start)}s/{timeout}s | "
-                          f"log {cli_log_size if cli_log_size >= 0 else 0}B | {tail[:90]}", flush=True)
+                    print(paint(f"      [{self.elapsed()}] {self.progress} | step {int(beat - start)}s/{timeout}s | "
+                                f"{tail[:100]}", "gray"), flush=True)
             clean = not why
         finally:
             if proc.poll() is None:
@@ -428,10 +455,10 @@ class Harness:
             t_prev = time.time()
             if durations:
                 eta = sum(durations) / len(durations) * (total - i + 1)
-                print(f"[{self.elapsed()}] --- suite {i}/{total}: {sid} (avg {sum(durations) / len(durations):.0f}s/suite, "
-                      f"~{int(eta // 60)}m left for suites, estimate only)", flush=True)
+                print(f"{self.stamp()} {paint(f'suite {i}/{total}', 'bold', 'cyan')} {bar(i - 1, total)} {paint(sid, 'bold')} "
+                      + paint(f"(avg {sum(durations) / len(durations):.0f}s/suite, ~{int(eta // 60)}m left, estimate only)", "gray"), flush=True)
             else:
-                print(f"[{self.elapsed()}] --- suite {i}/{total}: {sid}", flush=True)
+                print(f"{self.stamp()} {paint(f'suite {i}/{total}', 'bold', 'cyan')} {bar(i - 1, total)} {paint(sid, 'bold')}", flush=True)
             dep = s.get("depends_on")
             if dep and done.get(dep) != PASS:
                 self.record(f"run-{sid}", "suites", NOT_RUN, f"depends on {dep}, which did not pass")
@@ -572,7 +599,7 @@ class Harness:
                     ready = False
                     self.record("execution-repeat", g, FAIL, f"INFRA: DUT did not start: {e}")
             if ready:
-                print(f"      ... repeating execution {self.exec_ids[target]} ({target})", flush=True)
+                print(paint(f"      … repeating execution {self.exec_ids[target]} ({target})", "gray"), flush=True)
                 args = [self.th_cli, "test-run-execution", "repeat", "-i", str(self.exec_ids[target]), "--no-color", "--no-streaming"]
                 out, rc, why = self.pty_run(args, meta.get("prompt_answers", []) + self.m.get("default_prompt_answers", []),
                                             self.m.get("default_run_timeout_s", 900),
@@ -643,10 +670,21 @@ class Harness:
             f.write("\n".join(lines) + "\n")
         with open(base + ".json", "w") as f:
             json.dump({"version": version, "verdict": "GO" if go else "NO-GO", "counts": counts, "steps": self.steps}, f, indent=2)
-        print(f"\n===== Summary ({self.elapsed()}) =====")
+        rule = paint(("─" if UNICODE else "-") * 60, "gray")
+        print(f"\n{rule}\n" + paint(f" Summary  ·  {self.elapsed()}", "bold"))
+        print(paint(f" {'':<15}{'PASS':>7}{'FAIL':>7}{'SKIP':>7}", "gray"))
         for c, st in cats.items():
-            print(f"  {c:<14} {self.cat_counts(st)}")
-        print(f"Verdict: {'GO' if go else 'NO-GO'}")
+            n = {k: sum(1 for s in st if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
+            cells = "".join(paint(f"{n[k]:>7}", STATUS_COLOR[k] if n[k] else "gray") for k in (PASS, FAIL, NOT_RUN))
+            print(f" {c:<15}" + cells)
+        print(rule)
+        if fails or unexpected:
+            print(paint(" Needs attention:", "bold"))
+            for s in fails + unexpected:
+                why = (s["detail"].splitlines() or [""])[0][:90]
+                print(f"  {paint(SYMBOL[s['status']], STATUS_COLOR[s['status']])} {s['group']}/{s['id']}  {paint(why, 'dim')}")
+            print(rule)
+        print(" " + (paint("  GO  ", "bold", "inv", "green") if go else paint("  NO-GO  ", "bold", "inv", "red")))
         print(f"Report: {base}.md")
         return 0 if go else 1
 
@@ -658,8 +696,12 @@ def main() -> int:
     ap.add_argument("--out-dir", default="sanity_reports")
     ap.add_argument("--dry-run", action="store_true", help="coverage gate and read-only CLI commands only")
     ap.add_argument("--version-label", default="", help="TH version string for the report header")
+    ap.add_argument("--color", choices=["auto", "always", "never"], default="auto",
+                    help="colored output (auto = only on a terminal and when NO_COLOR is not set)")
     ap.add_argument("--list-suites", action="store_true", help="print live suites (public_id, size, sample tests) and exit")
     a = ap.parse_args()
+    global USE_COLOR
+    USE_COLOR = a.color == "always" or (a.color == "auto" and sys.stdout.isatty() and "NO_COLOR" not in os.environ)
     with open(a.manifest) as f:
         manifest = json.load(f)
     h = Harness(manifest, os.path.dirname(os.path.abspath(a.manifest)), a.out_dir, a.dry_run)
