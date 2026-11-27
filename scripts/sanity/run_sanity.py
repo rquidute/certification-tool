@@ -161,13 +161,15 @@ class Harness:
 
         def walk(node: Any) -> None:
             if isinstance(node, dict):
-                if isinstance(node.get("test_cases"), list):
+                tcs = node.get("test_cases")
+                if isinstance(tcs, (dict, list)):
+                    # Real shape: {"metadata": {"public_id": ...}, "test_cases": {<public_id>: {"metadata": ...}}}
                     sid = str((node.get("metadata") or {}).get("public_id") or node.get("public_id") or node.get("name"))
                     tests = set()
-                    for tc in node["test_cases"]:
+                    for key, tc in (tcs.items() if isinstance(tcs, dict) else enumerate(tcs)):
                         pid = (tc.get("metadata") or {}).get("public_id") or tc.get("public_id")
-                        if pid:
-                            tests.add(str(pid))
+                        tests.add(str(pid or (key if isinstance(key, str) else "")))
+                    tests.discard("")
                     self.live.setdefault(sid, set()).update(tests)
                 for v in node.values():
                     walk(v)
@@ -317,6 +319,16 @@ class Harness:
     def abs_path(self, p: Optional[str]) -> Optional[str]:
         return os.path.join(self.manifest_dir, p) if p and not os.path.isabs(p) else p
 
+    def find_custom_id(self, base: str) -> Optional[str]:
+        """Side-loaded tests that override an SDK test get a '-custom' marker in their public_id.
+        The exact spelling is not guaranteed, so match on normalised text instead of an exact id."""
+        norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())  # noqa: E731
+        for tests in self.live.values():
+            for t in tests:
+                if "custom" in t.lower() and norm(base) in norm(t):
+                    return t
+        return None
+
     # ---------- 5. custom tests ----------
     def custom(self) -> None:
         for kind, c in self.m.get("custom", {}).items():
@@ -337,11 +349,11 @@ class Harness:
                 shutil.copyfile(src, dest)
                 self.cli_step(f"custom-{kind}-rescan-add", g, ["rescan-tests"])
                 self.load_live()
-                present = any(c["test"] in t for t in self.live.values())
-                self.record(f"custom-{kind}-visible", g, PASS if present else FAIL,
-                            f"{c['test']} {'listed' if present else 'NOT listed'} after rescan")
-                if present:
-                    eid = self.run_test(f"custom-{kind}-run", g, c["test"], "pass", [], c.get("dut"), "fresh")
+                cid = self.find_custom_id(c["test"])
+                self.record(f"custom-{kind}-visible", g, PASS if cid else FAIL,
+                            f"{cid} listed after rescan" if cid else f"no custom variant of {c['test']} listed after rescan")
+                if cid:
+                    eid = self.run_test(f"custom-{kind}-run", g, cid, "pass", [], c.get("dut"), "fresh")
                     if eid:
                         self.exec_ids[f"custom-{kind}"] = eid
             finally:
@@ -349,9 +361,9 @@ class Harness:
                     os.remove(dest)
                 self.cli_step(f"custom-{kind}-rescan-remove", g, ["rescan-tests"])
                 self.load_live()
-                gone = not any(c["test"] in t for t in self.live.values())
-                self.record(f"custom-{kind}-removed", g, PASS if gone else FAIL,
-                            f"{c['test']} {'gone' if gone else 'STILL listed'} after removal + rescan")
+                left = self.find_custom_id(c["test"])
+                self.record(f"custom-{kind}-removed", g, PASS if not left else FAIL,
+                            "custom variant gone after removal + rescan" if not left else f"{left} STILL listed after removal + rescan")
 
     # ---------- 6. test-run-execution commands ----------
     def executions(self) -> None:
@@ -433,10 +445,18 @@ def main() -> int:
     ap.add_argument("--out-dir", default="sanity_reports")
     ap.add_argument("--dry-run", action="store_true", help="coverage gate and read-only CLI commands only")
     ap.add_argument("--version-label", default="", help="TH version string for the report header")
+    ap.add_argument("--list-suites", action="store_true", help="print live suites (public_id, size, sample tests) and exit")
     a = ap.parse_args()
     with open(a.manifest) as f:
         manifest = json.load(f)
     h = Harness(manifest, os.path.dirname(os.path.abspath(a.manifest)), a.out_dir, a.dry_run)
+    if a.list_suites:
+        if not h.load_live():
+            print(h.steps[-1]["detail"])
+            return 1
+        for sid, tests in sorted(h.live.items()):
+            print(f"{sid!r}: {len(tests)} tests, e.g. {sorted(tests)[:3]}")
+        return 0
     version = a.version_label or (h.cli(["--version"])[1].strip().replace("\n", " ")[:200])
     try:
         h.smoke()

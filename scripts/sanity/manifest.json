@@ -1,5 +1,5 @@
 {
-  "_comment": "Edit this file to add tests. One entry per suite. 'suite' is the suite public_id as shown by `th-cli available-tests --json`; 'test' is the representative test case public_id. Entries with 'TODO' values must be filled in on the TH host before the first real run (the coverage gate lists every live suite that is neither here nor in 'excluded').",
+  "_comment": "One entry per suite. 'suite' = suite public_id and 'test' = test case public_id, both as printed by `python3 scripts/sanity/run_sanity.py --list-suites`. Entries still containing TODO make the run NO-GO by design: the coverage gate lists every live suite that is neither here nor in 'excluded'.",
   "th_cli": "th-cli",
   "th_root": "~/certification-tool",
   "apps_dir": "~/apps",
@@ -13,15 +13,16 @@
     }
   },
   "suites": [
-    {"id": "yaml-chip-tool", "suite": "TODO", "test": "TC-ACE-1.1", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
-    {"id": "python-commissioning", "suite": "TODO", "test": "TC-ACE-1.2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass",
+    {"id": "python-main", "suite": "TODO", "test": "TC_CGEN_2_5", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "python-old-format", "suite": "Python Testing Suite - Old script format", "test": "TC_ACE_1_2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass",
      "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^no$"}]},
-    {"id": "python-commissioning-reuse", "suite": "TODO", "test": "TC-ACE-1.2", "dut": "all-clusters", "dut_start": "reuse", "expect": "pass",
-     "depends_on": "python-commissioning",
+    {"id": "python-old-format-reuse-credentials", "suite": "Python Testing Suite - Old script format", "test": "TC_ACE_1_2", "dut": "all-clusters", "dut_start": "reuse", "expect": "pass",
+     "depends_on": "python-old-format",
      "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^yes$"}]},
-    {"id": "sample-suite-1", "suite": "TODO", "test": "TCSS1001", "dut": null, "expect": "pass"},
+    {"id": "yaml-chip-tool", "suite": "TODO", "test": "TODO", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "sample-suite-1", "suite": "TODO", "test": "TODO", "dut": null, "expect": "pass"},
     {"id": "sample-suite-2", "suite": "TODO", "test": "TODO", "dut": null, "expect": "pass"},
-    {"id": "sample-suite-3-mandatory", "suite": "TODO", "test": "TCSS3001", "dut": null, "expect": "pass"}
+    {"id": "sample-suite-3-mandatory", "suite": "TODO", "test": "TODO", "dut": null, "expect": "pass"}
   ],
   "excluded": [
     {"suite": "TODO-simulated-yaml", "reason": "Simulated YAML needs an external controller to commission chip-app1; not automatable here"},
@@ -34,13 +35,13 @@
     "yaml": {
       "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/sdk/Test_TC_ACE_1_1.yaml",
       "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/custom",
-      "test": "TC-ACE-1.1-custom",
+      "test": "TC_ACE_1_1",
       "dut": "all-clusters"
     },
     "python": {
       "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/sdk/TC_ACE_1_2.py",
       "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/custom",
-      "test": "TC-ACE-1.2-custom",
+      "test": "TC_ACE_1_2",
       "dut": "all-clusters"
     }
   }
