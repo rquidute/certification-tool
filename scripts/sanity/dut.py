@@ -5,6 +5,7 @@ explicit about state: "fresh" wipes /tmp/chip_* (factory reset), "reuse" keeps
 the KVS so credentials from a previous commissioning stay valid.
 """
 import os
+import re
 import signal
 import subprocess
 import time
@@ -33,9 +34,12 @@ class DutManager:
                 self.proc.kill()
                 self.proc.wait()
         self.proc = None
-        # Also catch apps left over from a previous (crashed) harness run.
+        # Also catch apps left over from a previous (crashed) harness run. `pkill -x` cannot be used:
+        # it refuses process names over 15 characters (chip-all-clusters-app is 21) and matches nothing.
+        # Match the command line instead, anchored to the executable path so unrelated processes
+        # that merely mention the name (editors, tail, grep) are not hit.
         for prof in self.profiles.values():
-            subprocess.run(["pkill", "-9", "-x", prof["binary"]], check=False)
+            subprocess.run(["pkill", "-9", "-f", rf"(^|/){re.escape(prof['binary'])}( |$)"], check=False)
         time.sleep(1)
 
     def is_alive(self) -> bool:
