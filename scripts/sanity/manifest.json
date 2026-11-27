@@ -1,0 +1,47 @@
+{
+  "_comment": "Edit this file to add tests. One entry per suite. 'suite' is the suite public_id as shown by `th-cli available-tests --json`; 'test' is the representative test case public_id. Entries with 'TODO' values must be filled in on the TH host before the first real run (the coverage gate lists every live suite that is neither here nor in 'excluded').",
+  "th_cli": "th-cli",
+  "th_root": "~/certification-tool",
+  "apps_dir": "~/apps",
+  "default_run_timeout_s": 900,
+  "dut_profiles": {
+    "all-clusters": {
+      "binary": "chip-all-clusters-app",
+      "args": [],
+      "ready_marker": "mDNS service published: _matterc._udp",
+      "ready_timeout_s": 60
+    }
+  },
+  "suites": [
+    {"id": "yaml-chip-tool", "suite": "TODO", "test": "TC-ACE-1.1", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "python-commissioning", "suite": "TODO", "test": "TC-ACE-1.2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass",
+     "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^no$"}]},
+    {"id": "python-commissioning-reuse", "suite": "TODO", "test": "TC-ACE-1.2", "dut": "all-clusters", "dut_start": "reuse", "expect": "pass",
+     "depends_on": "python-commissioning",
+     "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^yes$"}]},
+    {"id": "sample-suite-1", "suite": "TODO", "test": "TCSS1001", "dut": null, "expect": "pass"},
+    {"id": "sample-suite-2", "suite": "TODO", "test": "TODO", "dut": null, "expect": "pass"},
+    {"id": "sample-suite-3-mandatory", "suite": "TODO", "test": "TCSS3001", "dut": null, "expect": "pass"}
+  ],
+  "excluded": [
+    {"suite": "TODO-simulated-yaml", "reason": "Simulated YAML needs an external controller to commission chip-app1; not automatable here"},
+    {"suite": "TODO-manual-yaml", "reason": "Manual tests require a human"}
+  ],
+  "default_prompt_answers": [
+    {"match": "(?i)commissioning mode|ready|continue|press", "choose": "(?i)^(yes|ok|done|continue|pass|ready|y)$"}
+  ],
+  "custom": {
+    "yaml": {
+      "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/sdk/Test_TC_ACE_1_1.yaml",
+      "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/custom",
+      "test": "TC-ACE-1.1-custom",
+      "dut": "all-clusters"
+    },
+    "python": {
+      "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/sdk/TC_ACE_1_2.py",
+      "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/custom",
+      "test": "TC-ACE-1.2-custom",
+      "dut": "all-clusters"
+    }
+  }
+}
