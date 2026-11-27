@@ -64,6 +64,9 @@ class Harness:
         self.dry_run = dry_run
         self.manifest_dir = manifest_dir
         self.steps: List[dict] = []
+        self.t0 = time.time()
+        self.phase_name = ""
+        self.progress = ""
         self.dut = DutManager(manifest["dut_profiles"], manifest.get("apps_dir", "~/apps"), out_dir)
         self.project_id: Optional[int] = None
         self.extra_projects: List[int] = []
@@ -72,11 +75,25 @@ class Harness:
         os.makedirs(out_dir, exist_ok=True)
 
     # ---------- recording ----------
+    def elapsed(self) -> str:
+        s = int(time.time() - self.t0)
+        return f"{s // 3600:d}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60:02d}:{s % 60:02d}"
+
+    def tally(self) -> str:
+        c = {k: sum(1 for s in self.steps if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
+        return f"ok {c[PASS]} fail {c[FAIL]} skip {c[NOT_RUN]}"
+
+    def phase(self, n: int, name: str) -> None:
+        self.phase_name = f"phase {n}/5 {name}"
+        print(f"\n[{self.elapsed()}] ===== Phase {n}/5: {name} ({self.tally()}) =====", flush=True)
+
     def record(self, sid: str, group: str, status: str, detail: str = "", dur: float = 0.0, log: str = "") -> str:
         self.steps.append({"id": sid, "group": group, "status": status, "detail": detail.strip()[-600:],
                            "duration_s": round(dur, 1), "log": log})
         mark = {"PASS": "ok  ", "FAIL": "FAIL", "NOT_RUN": "skip"}[status]
-        print(f"[{mark}] {group}/{sid} {detail.strip().splitlines()[0][:110] if detail.strip() else ''}", flush=True)
+        took = f" ({dur:.0f}s)" if dur >= 1 else ""
+        print(f"[{self.elapsed()}] [{mark}] {group}/{sid}{took} "
+              f"{detail.strip().splitlines()[0][:100] if detail.strip() else ''}", flush=True)
         return status
 
     # ---------- th-cli plumbing ----------
@@ -293,7 +310,8 @@ class Harness:
             if time.time() - beat > 30:
                 beat = time.time()
                 tail = next((ln.strip() for ln in reversed(buf.splitlines()) if ln.strip()), "(no output yet)")
-                print(f"      ... {int(beat - start)}s elapsed, last output: {tail[:100]}", flush=True)
+                print(f"      [{self.elapsed()}] {self.progress} | step {int(beat - start)}s/{timeout}s | "
+                      f"last output: {tail[:90]}", flush=True)
         if proc.poll() is None:
             proc.kill()
         proc.wait()
@@ -308,8 +326,21 @@ class Harness:
     # ---------- 4. suites ----------
     def run_suites(self) -> None:
         done: Dict[str, str] = {}
-        for s in self.m["suites"]:
+        total = len(self.m["suites"])
+        durations: List[float] = []
+        t_prev = time.time()
+        for i, s in enumerate(self.m["suites"], 1):
             sid = s["id"]
+            self.progress = f"suite {i}/{total}"
+            if i > 1 and time.time() - t_prev > 5:  # skipped steps are instant and would skew the average
+                durations.append(time.time() - t_prev)
+            t_prev = time.time()
+            if durations:
+                eta = sum(durations) / len(durations) * (total - i + 1)
+                print(f"[{self.elapsed()}] --- suite {i}/{total}: {sid} (avg {sum(durations) / len(durations):.0f}s/suite, "
+                      f"~{int(eta // 60)}m left for suites, estimate only)", flush=True)
+            else:
+                print(f"[{self.elapsed()}] --- suite {i}/{total}: {sid}", flush=True)
             dep = s.get("depends_on")
             if dep and done.get(dep) != PASS:
                 self.record(f"run-{sid}", "suites", NOT_RUN, f"depends on {dep}, which did not pass")
@@ -346,6 +377,7 @@ class Harness:
     # ---------- 5. custom tests ----------
     def custom(self) -> None:
         for kind, c in self.m.get("custom", {}).items():
+            self.progress = f"custom {kind}"
             g = "custom"
             src = c["src"].format(th_root=self.th_root)
             dest_dir = c["dest_dir"].format(th_root=self.th_root)
@@ -433,7 +465,7 @@ class Harness:
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         base = os.path.join(self.out_dir, f"sanity_{stamp}")
         counts = {k: sum(1 for s in self.steps if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
-        lines = [f"# TH sanity report - {version}", "", f"- Date: {stamp}", f"- Mode: {'DRY RUN' if self.dry_run else 'FULL'}",
+        lines = [f"# TH sanity report - {version}", "", f"- Date: {stamp}", f"- Total time: {self.elapsed()}", f"- Mode: {'DRY RUN' if self.dry_run else 'FULL'}",
                  f"- **Verdict: {'GO' if go else 'NO-GO'}**", f"- PASS {counts[PASS]} / FAIL {counts[FAIL]} / NOT_RUN {counts[NOT_RUN]}",
                  f"- Live suites: {len(self.live)}", "", "| Group | Step | Status | Time s | Detail |", "|---|---|---|---|---|"]
         for s in self.steps:
@@ -447,7 +479,8 @@ class Harness:
             f.write("\n".join(lines) + "\n")
         with open(base + ".json", "w") as f:
             json.dump({"version": version, "verdict": "GO" if go else "NO-GO", "counts": counts, "steps": self.steps}, f, indent=2)
-        print(f"\nVerdict: {'GO' if go else 'NO-GO'}  (PASS {counts[PASS]}, FAIL {counts[FAIL]}, NOT_RUN {counts[NOT_RUN]})")
+        print(f"\nVerdict: {'GO' if go else 'NO-GO'}  (PASS {counts[PASS]}, FAIL {counts[FAIL]}, NOT_RUN {counts[NOT_RUN]}) "
+              f"in {self.elapsed()}")
         print(f"Report: {base}.md")
         return 0 if go else 1
 
@@ -473,10 +506,15 @@ def main() -> int:
         return 0
     version = a.version_label or (h.cli(["--version"])[1].strip().replace("\n", " ")[:200])
     try:
+        h.phase(1, "CLI smoke")
         h.smoke()
+        h.phase(2, "Coverage gate")
         h.coverage_gate()
+        h.phase(3, "One test per suite")
         h.run_suites()
+        h.phase(4, "Custom YAML/Python tests")
         h.custom()
+        h.phase(5, "test-run-execution commands")
         h.executions()
     except KeyboardInterrupt:
         h.record("interrupted", "harness", FAIL, "interrupted by user")
