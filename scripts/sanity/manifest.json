@@ -1,5 +1,5 @@
 {
-  "_comment": "One entry per suite. 'suite' = suite public_id and 'test' = test case public_id, as printed by `python3 scripts/sanity/run_sanity.py --list-suites`. A live suite that is neither in 'suites' nor in 'excluded' makes the run NO-GO (coverage gate). 'custom' lists SDK tests copied into the custom folders to exercise every '<suite>-custom' suite.",
+  "_comment": "This file is the SCOPE of the sanity run: edit it to change what is tested (no code change needed). One entry per suite; 'suite' = suite public_id and 'test' = test case public_id, as printed by `python3 scripts/sanity/run_sanity.py --list-suites`. A live suite that is neither in 'suites' nor in 'excluded' makes the run NO-GO (coverage gate). 'custom' lists SDK tests copied into the custom folders to exercise every '<suite>-custom' suite. Validate edits with --dry-run. See README.md.",
   "th_cli": "th-cli",
   "th_root": "~/certification-tool",
   "apps_dir": "~/apps",

@@ -7,6 +7,9 @@ running backend and a real DUT app (`chip-all-clusters-app`), covers **every sui
 
 Standard library only: nothing to install on the TH host.
 
+> **Scope.** What gets tested is defined in `scripts/sanity/manifest.json`; edit it to fit the release you are validating
+> (see [Scope of the test](#scope-of-the-test-manifestjson)).
+>
 > **What a GO means.** One test per suite is a *smoke test* of the TH: loaders, runner, prompts, CLI and the
 > custom-test flow all work. It is **not** test-case coverage. It will catch a broken suite or runner; it will not
 > catch a regression inside one specific test case.
@@ -42,6 +45,65 @@ Exit code: `0` GO, `1` NO-GO, `2` refused to start or cancelled before anything 
 | `chip-all-clusters-app` in `apps_dir` (default `~/apps`) | the DUT for most suites |
 | Python 3 | the harness itself |
 | TH web UI **closed**, no other runs | the TH sends prompts to every connected client |
+
+---
+
+## Scope of the test: `manifest.json`
+
+**`scripts/sanity/manifest.json` defines the scope of the sanity run. Edit it to change what is tested: no code change
+is needed.** The shipped file is a starting point; add, remove or swap entries to fit the release you are validating.
+
+| What you control in the manifest | Key |
+|---|---|
+| which suites are tested, which test represents each, which DUT it uses, fresh or reused credentials | `suites[]` |
+| suites that are deliberately **not** tested, with the reason (shown in the report as `excluded-…`) | `excluded[]` |
+| which SDK tests are side-loaded to exercise the `<suite>-custom` suites | `custom[]` |
+| which test is aborted while running, and after how many seconds | `abort_run` |
+| DUT apps: binary, arguments, readiness patterns | `dut_profiles` |
+| how interactive prompts are answered | `default_prompt_answers`, and `prompt_answers` / `text_answers` per entry |
+| which leftover projects are cleaned up before a run | `cleanup` |
+| where `th-cli`, the apps and the TH checkout live, and the per-run timeout | `th_cli`, `apps_dir`, `th_root`, `default_run_timeout_s` |
+
+The coverage gate keeps the scope honest: if the TH has a suite that is neither in `suites` nor in `excluded`, the run
+is NO-GO. Dropping a suite from the scope therefore has to be written down, with a reason.
+
+What is **not** in the manifest, because it is code: the list of `th-cli` commands that get exercised
+(`th_sanity/phases/cli_commands.py` and `executions.py`), the order of the phases (`PHASES` in `cli.py`) and the verdict
+rules. See [Extending it](#extending-it).
+
+**Scope in the shipped manifest**
+
+One test per suite (`suites[]`):
+
+| Step | Suite | Test | DUT |
+|---|---|---|---|
+| `yaml-chip-tool` | FirstChipToolSuite | `TC-ACE-1.1` | all-clusters |
+| `yaml-manual` | FirstManualSuite | `TC-ACT-2.1` | none (every prompt accepted as PASS) |
+| `onboarding-payload` | OnboardingPayloadTestSuite | `TC-DD-1.1` | all-clusters (QR code taken from the DUT's log) |
+| `python-auto-commissioning` | Python Testing Suite - Auto commissioning | `TC_ACE_1_3` | all-clusters |
+| `python-mandatories` | Python Testing Suite - Mandatories | `TC_IDM_10_2` | all-clusters |
+| `python-no-auto-commissioning` | Python Testing Suite - No auto commissioning | `TC_CGEN_2_5` | all-clusters |
+| `python-old-format` | Python Testing Suite - Old script format | `TC_ACE_1_2` | all-clusters |
+| `python-old-format-reuse-credentials` | Python Testing Suite - Old script format | `TC_ACE_1_2` | all-clusters, **reuse** credentials |
+
+Custom (side-loaded) tests (`custom[]`), each copied from the SDK folder into the custom folder:
+
+| Step | Kind | Test | Must appear in | |
+|---|---|---|---|---|
+| `yaml-automated` | YAML | `TC-ACE-1.1` | FirstChipToolSuite-custom | run |
+| `yaml-manual` | YAML | `TC-ACT-2.1` | FirstManualSuite-custom | run |
+| `yaml-simulated` | YAML | `TC-CC-3.4` | FirstAppSuite-custom | load only |
+| `python-auto-commissioning` | Python | `TC_ACE_1_3` | Python Testing Suite - Auto commissioning-custom | run |
+| `python-no-auto-commissioning` | Python | `TC_CGEN_2_5` | Python Testing Suite - No auto commissioning-custom | run |
+| `python-old-format` | Python | `TC_ACE_1_2` | Python Testing Suite - Old script format-custom | run |
+
+Excluded on purpose: `FirstAppSuite` (simulated YAML needs an external controller to commission the chip-app).
+Abort-while-running uses `python-auto-commissioning`, aborted 8 s after the runner reports `running`.
+
+Typical edits: swap a suite's `test` for a faster or more representative one (`--list-suites` shows valid ids), add a
+suite that appeared in a new TH version, exclude a suite you cannot automate (with a `reason`), or point `th_root` /
+`apps_dir` at a different checkout. After editing, `python3 scripts/sanity/run_sanity.py --dry-run` validates the
+manifest against the live TH without running anything.
 
 ---
 
@@ -165,7 +227,7 @@ neither reported nor killed.
 
 ## Manifest reference
 
-`manifest.json` is the only file you edit to change *what* is tested. Keys starting with `_` are ignored.
+`manifest.json` is the only file you edit to change *what* is tested (see [Scope of the test](#scope-of-the-test-manifestjson)). Keys starting with `_` are ignored.
 
 ```jsonc
 {
