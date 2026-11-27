@@ -187,7 +187,7 @@ class Harness:
     def runner_state(self) -> Optional[str]:
         """idle | loading | ready | running (test-runner-status --json), None if unreadable."""
         d = self.cli_json(["test-runner-status", "--json"])
-        return str(d.get("state")).lower() if isinstance(d, dict) and d.get("state") is not None else None
+        return str(d.get("state")).split(".")[-1].lower() if isinstance(d, dict) and d.get("state") is not None else None
 
     def wait_state(self, want: str, timeout: int, stop: Optional[threading.Thread] = None) -> Tuple[bool, Optional[str]]:
         deadline, st = time.time() + timeout, None
@@ -203,7 +203,7 @@ class Harness:
     def exec_state(self, eid: int) -> Optional[str]:
         d = self.cli_json(["test-run-execution", "list", "-i", str(eid), "--json"])
         row = d if isinstance(d, dict) and "state" in d else (items(d)[0] if items(d) else {})
-        return str(row.get("state")).lower() if row.get("state") is not None else None
+        return str(row.get("state")).split(".")[-1].lower() if row.get("state") is not None else None
 
     # ---------- 0. pre-flight cleanup ----------
     def stale_projects(self) -> Optional[List[dict]]:
@@ -336,9 +336,16 @@ class Harness:
         uncovered = sorted(set(self.live) - listed - set(excluded))
         # '<suite>-custom' suites hold the user's side-loaded files and come and go with them. The custom
         # step below tests its own fixtures; user files are reported, never silently counted as covered.
+        by_suite: Dict[str, List[str]] = {}
+        for f in self.custom_fixtures():
+            if f.get("expect_suite"):
+                by_suite.setdefault(f["expect_suite"], []).append(f["id"])
         for u in [x for x in uncovered if x.endswith("-custom")]:
             uncovered.remove(u)
-            self.record(f"excluded-{u}", g, NOT_RUN, f"user custom suite ({len(self.live[u])} tests); only the harness's own fixtures are tested")
+            if u in by_suite:
+                self.record(f"custom-suite-{u}", g, PASS, f"user custom suite ({len(self.live[u])} tests) is exercised by fixture(s): {', '.join(by_suite[u])}")
+            else:
+                self.record(f"excluded-{u}", g, NOT_RUN, f"user custom suite ({len(self.live[u])} tests) has no matching fixture in the manifest")
         for u in uncovered:
             self.record(f"uncovered-{u}", g, FAIL, f"suite {u!r} exists in the TH ({len(self.live[u])} tests) but is neither in the manifest nor excluded")
         for suite, reason in excluded.items():
@@ -549,14 +556,16 @@ class Harness:
     def abs_path(self, p: Optional[str]) -> Optional[str]:
         return os.path.join(self.manifest_dir, p) if p and not os.path.isabs(p) else p
 
-    def find_custom(self, base: str) -> Optional[Tuple[str, str]]:
+    def find_custom(self, base: str, suite: Optional[str] = None) -> Optional[Tuple[str, str]]:
         """(suite, test id) of a side-loaded variant of `base`. Python overrides get a '-custom' id suffix;
         custom YAML tests land in a '<suite>-custom' suite, possibly with the same id as the SDK test."""
         norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())  # noqa: E731
-        for suite, tests in self.live.items():
+        for sname, tests in self.live.items():
+            if suite is not None and sname != suite:
+                continue
             for t in tests:
-                if norm(base) in norm(t) and ("custom" in t.lower() or suite.lower().endswith("-custom")):
-                    return suite, t
+                if norm(base) in norm(t) and ("custom" in t.lower() or sname.lower().endswith("-custom")):
+                    return sname, t
         return None
 
     def find_custom_id(self, base: str) -> Optional[str]:
@@ -570,54 +579,84 @@ class Harness:
         return None
 
     # ---------- 5. custom tests ----------
+    def custom_fixtures(self) -> List[dict]:
+        fx = self.m.get("custom", [])
+        if isinstance(fx, dict):  # older manifest layout: {"yaml": {...}, "python": {...}}
+            fx = [{"id": k, **v} for k, v in fx.items()]
+        return fx
+
     def custom(self) -> None:
-        for kind, c in self.m.get("custom", {}).items():
-            self.progress = f"custom {kind}"
-            g = "custom"
-            src = c["src"].format(th_root=self.th_root)
-            dest_dir = c["dest_dir"].format(th_root=self.th_root)
-            dest = os.path.join(dest_dir, os.path.basename(src))
-            if self.dry_run:
-                self.record(f"custom-{kind}", g, NOT_RUN, "dry-run")
-                continue
-            if os.path.exists(dest):
-                self.record(f"custom-{kind}", g, NOT_RUN, f"{dest} already exists; refusing to overwrite or delete a user file")
-                continue
-            if not os.path.isfile(src):
-                self.record(f"custom-{kind}", g, FAIL, f"fixture source missing: {src}")
-                continue
-            try:
-                shutil.copyfile(src, dest)
-                _, rescan_out = self.cli_step(f"custom-{kind}-rescan-add", g, ["rescan-tests"])
-                self.load_live()
-                hit = self.find_custom(c["test"])
-                cid = hit[1] if hit else None
-                if hit:
-                    self.record(f"custom-{kind}-visible", g, PASS, f"{hit[1]} in suite {hit[0]!r}")
+        """Copy each fixture (an SDK test) into the custom folder, rescan ONCE, check each shows up in the
+        expected '<suite>-custom' suite, run the ones that can run, then remove them and rescan ONCE more."""
+        g = "custom"
+        fixtures = self.custom_fixtures()
+        self.progress = "custom tests"
+        if self.dry_run:
+            for f in fixtures:
+                self.record(f"custom-{f['id']}", g, NOT_RUN, "dry-run")
+            return
+        placed: List[Tuple[dict, str]] = []
+        try:
+            for f in fixtures:
+                src = f["src"].format(th_root=self.th_root)
+                dest_dir = f["dest_dir"].format(th_root=self.th_root)
+                dest = os.path.join(dest_dir, os.path.basename(src))
+                if os.path.exists(dest):
+                    self.record(f"custom-{f['id']}", g, NOT_RUN, f"{dest} already exists; refusing to overwrite or delete a user file")
+                elif not os.path.isfile(src):
+                    self.record(f"custom-{f['id']}", g, FAIL, f"fixture source missing: {src}")
+                elif not os.path.isdir(dest_dir):
+                    self.record(f"custom-{f['id']}", g, FAIL, f"custom folder missing: {dest_dir}")
                 else:
-                    cust = {s: sorted(t)[:5] for s, t in self.live.items() if s.lower().endswith("-custom")}
-                    self.record(f"custom-{kind}-visible", g, FAIL,
-                                f"no custom variant of {c['test']} after rescan\ncustom suites now: {cust}\n"
-                                f"rescan said: {rescan_out.strip()[-500:]}")
-                if hit and "custom" not in hit[1].lower():
+                    shutil.copyfile(src, dest)
+                    placed.append((f, dest))
+            if not placed:
+                return
+            _, rescan_out = self.cli_step("custom-rescan-add", g, ["rescan-tests"], timeout=180)
+            rescan_file = os.path.join(self.out_dir, "custom-rescan-add.out")
+            with open(rescan_file, "w") as fh:
+                fh.write(rescan_out)
+            self.load_live()
+            for f, _ in placed:
+                sid, want = f["id"], f.get("expect_suite")
+                hit = self.find_custom(f["test"], want)
+                if hit:
+                    self.record(f"custom-{sid}-visible", g, PASS, f"{hit[1]} in suite {hit[0]!r}")
+                else:
+                    elsewhere = self.find_custom(f["test"])
+                    where = f"found in a different suite {elsewhere[0]!r}" if elsewhere else "not listed in any custom suite"
+                    note = ""
+                    if f.get("kind", "") == "yaml" or str(f["src"]).endswith((".yaml", ".yml")):
+                        note = ("\nNOTE: the custom YAML collection is built when the backend imports "
+                                "support/yaml_tests/__init__.py, so a rescan may not reload it (backend restart needed?)")
+                    self.record(f"custom-{sid}-visible", g, FAIL,
+                                f"{f['test']} expected in {want!r}: {where}{note}\nfull rescan output: {rescan_file}")
+                    continue
+                if f.get("run") is False:
+                    self.record(f"custom-{sid}-run", g, NOT_RUN, f.get("run_note", "not run by design"))
+                elif "custom" not in hit[1].lower():
                     # Same id as the SDK test: `th-cli run-tests -t <id>` cannot say which one to run, so a
                     # PASS here could silently be the SDK test. Refuse rather than report a false pass.
-                    self.record(f"custom-{kind}-run", g, NOT_RUN,
+                    self.record(f"custom-{sid}-run", g, NOT_RUN,
                                 f"custom id {hit[1]!r} is identical to the SDK test id; th-cli cannot select the "
                                 f"custom variant unambiguously")
-                elif cid:
-                    eid = self.run_test(f"custom-{kind}-run", g, cid, "pass", [], c.get("dut"), "fresh")
+                else:
+                    self.progress = f"custom {sid}"
+                    eid = self.run_test(f"custom-{sid}-run", g, hit[1], f.get("expect", "pass"), f.get("prompt_answers", []),
+                                        f.get("dut"), "fresh", text_answers=f.get("text_answers"))
                     if eid:
-                        self.exec_ids[f"custom-{kind}"] = eid
-            finally:
+                        self.exec_ids[f"custom-{sid}"] = eid
+        finally:
+            for _, dest in placed:
                 if os.path.exists(dest):
                     os.remove(dest)
-                self.cli_step(f"custom-{kind}-rescan-remove", g, ["rescan-tests"])
+            if placed:
+                self.cli_step("custom-rescan-remove", g, ["rescan-tests"], timeout=180)
                 self.load_live()
-                left = self.find_custom(c["test"])
-                left = left[1] if left else None
-                self.record(f"custom-{kind}-removed", g, PASS if not left else FAIL,
-                            "custom variant gone after removal + rescan" if not left else f"{left} STILL listed after removal + rescan")
+                for f, _ in placed:
+                    left = self.find_custom(f["test"], f.get("expect_suite"))
+                    self.record(f"custom-{f['id']}-removed", g, PASS if not left else FAIL,
+                                "custom variant gone after removal + rescan" if not left else f"{left[1]} STILL listed after removal + rescan")
 
     # ---------- 6. test-run-execution commands ----------
     def executions(self) -> None:

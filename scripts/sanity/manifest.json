@@ -1,5 +1,5 @@
 {
-  "_comment": "One entry per suite. 'suite' = suite public_id and 'test' = test case public_id, as printed by `python3 scripts/sanity/run_sanity.py --list-suites`. A live suite that is neither in 'suites' nor in 'excluded' makes the run NO-GO (coverage gate). Suites ending in '-custom' are user side-loaded suites and are reported, not tested.",
+  "_comment": "One entry per suite. 'suite' = suite public_id and 'test' = test case public_id, as printed by `python3 scripts/sanity/run_sanity.py --list-suites`. A live suite that is neither in 'suites' nor in 'excluded' makes the run NO-GO (coverage gate). 'custom' lists SDK tests copied into the custom folders to exercise every '<suite>-custom' suite.",
   "th_cli": "th-cli",
   "th_root": "~/certification-tool",
   "apps_dir": "~/apps",
@@ -14,38 +14,54 @@
   },
   "suites": [
     {"id": "yaml-chip-tool", "suite": "FirstChipToolSuite", "test": "TC-ACE-1.1", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
+    {"id": "yaml-manual", "suite": "FirstManualSuite", "test": "TC-ACT-2.1", "dut": null, "expect": "pass",
+     "prompt_answers": [{"match": ".", "choose": "(?i)^(pass|yes|ok|done|continue|y)$"}]},
     {"id": "onboarding-payload", "suite": "OnboardingPayloadTestSuite", "test": "TC-DD-1.1", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass",
      "text_answers": [{"match": "QR code payload", "value": "@dut_qr"}, {"match": "12-bit discriminator", "value": "@qr_disc"}]},
     {"id": "python-auto-commissioning", "suite": "Python Testing Suite - Auto commissioning", "test": "TC_ACE_1_3", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
     {"id": "python-mandatories", "suite": "Python Testing Suite - Mandatories", "test": "TC_IDM_10_2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
     {"id": "python-no-auto-commissioning", "suite": "Python Testing Suite - No auto commissioning", "test": "TC_CGEN_2_5", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
-    {"id": "python-old-format", "suite": "Python Testing Suite - Old script format", "test": "TC_ACE_1_2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass",
-     "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^no$"}]},
+    {"id": "python-old-format", "suite": "Python Testing Suite - Old script format", "test": "TC_ACE_1_2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
     {"id": "python-old-format-reuse-credentials", "suite": "Python Testing Suite - Old script format", "test": "TC_ACE_1_2", "dut": "all-clusters", "dut_start": "reuse", "expect": "pass",
      "depends_on": "python-old-format",
-     "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^yes$"}]}
+     "prompt_answers": [{"match": "reuse the previous commissioning", "choose": "(?i)^yes$"}]}
   ],
   "abort_run": {"from": "python-auto-commissioning", "after_s": 8},
   "cleanup": {"project_name_regex": "^sanity-(?:harness-)?\\d{9,}(?:-renamed)?(?:[ _(\\-].*)?$", "max_delete": 25},
   "excluded": [
-    {"suite": "FirstAppSuite", "reason": "Simulated YAML (DUT is chip-app run by the TH); needs an external controller to commission it, not automatable here"},
-    {"suite": "FirstManualSuite", "reason": "Manual tests require a human"}
+    {"suite": "FirstAppSuite", "reason": "Simulated YAML (DUT is chip-app run by the TH); needs an external controller to commission it, not automatable here"}
   ],
   "default_prompt_answers": [
+    {"match": "Should the DUT be commissioned", "choose": "(?i)^yes$"},
+    {"match": "reuse the previous commissioning", "choose": "(?i)^no$"},
     {"match": "(?i)commissioning mode|ready|continue|press", "choose": "(?i)^(yes|ok|done|continue|pass|ready|y)$"}
   ],
-  "custom": {
-    "yaml": {
-      "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/sdk/Test_TC_ACE_1_1.yaml",
-      "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/custom",
-      "test": "TC-ACE-1.1",
-      "dut": "all-clusters"
-    },
-    "python": {
-      "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/sdk/TC_ACE_1_2.py",
-      "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/custom",
-      "test": "TC_ACE_1_2",
-      "dut": "all-clusters"
-    }
-  }
+  "custom": [
+    {"id": "yaml-automated", "kind": "yaml",
+     "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/sdk/Test_TC_ACE_1_1.yaml",
+     "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/custom",
+     "test": "TC-ACE-1.1", "expect_suite": "FirstChipToolSuite-custom", "dut": "all-clusters"},
+    {"id": "yaml-manual", "kind": "yaml",
+     "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/sdk/Test_TC_ACT_2_1.yaml",
+     "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/custom",
+     "test": "TC-ACT-2.1", "expect_suite": "FirstManualSuite-custom", "dut": null,
+     "prompt_answers": [{"match": ".", "choose": "(?i)^(pass|yes|ok|done|continue|y)$"}]},
+    {"id": "yaml-simulated", "kind": "yaml",
+     "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/sdk/Test_TC_CC_3_4_Simulated.yaml",
+     "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/yaml_tests/yaml/custom",
+     "test": "TC-CC-3.4", "expect_suite": "FirstAppSuite-custom", "run": false,
+     "run_note": "simulated suite needs an external controller to commission chip-app; only loading is checked"},
+    {"id": "python-auto-commissioning", "kind": "python",
+     "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/sdk/TC_ACE_1_3.py",
+     "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/custom",
+     "test": "TC_ACE_1_3", "expect_suite": "Python Testing Suite - Auto commissioning-custom", "dut": "all-clusters"},
+    {"id": "python-no-auto-commissioning", "kind": "python",
+     "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/sdk/TC_CGEN_2_5.py",
+     "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/custom",
+     "test": "TC_CGEN_2_5", "expect_suite": "Python Testing Suite - No auto commissioning-custom", "dut": "all-clusters"},
+    {"id": "python-old-format", "kind": "python",
+     "src": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/sdk/TC_ACE_1_2.py",
+     "dest_dir": "{th_root}/backend/test_collections/matter/sdk_tests/sdk_checkout/python_testing/scripts/custom",
+     "test": "TC_ACE_1_2", "expect_suite": "Python Testing Suite - Old script format-custom", "dut": "all-clusters"}
+  ]
 }
