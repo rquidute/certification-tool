@@ -38,6 +38,11 @@ from dut import DutError, DutManager  # noqa: E402
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PASS, FAIL, NOT_RUN = "PASS", "FAIL", "NOT_RUN"
 PROMPT_TRIGGER = "Please enter a number for an option above"
+# Report categories. Coverage is a pre-flight gate (is every suite accounted for?), not a test result, so it
+# is counted on its own and never mixed into the test PASS numbers.
+CATEGORY = {"cli": "CLI commands", "executions": "CLI commands", "suites": "Test suites",
+            "custom": "Custom tests", "coverage": "Coverage gate", "cleanup": "Harness", "harness": "Harness"}
+CATEGORY_ORDER = ["Test suites", "Custom tests", "CLI commands", "Coverage gate", "Harness"]
 
 
 def strip(text: str) -> str:
@@ -92,8 +97,11 @@ class Harness:
                            "duration_s": round(dur, 1), "log": log})
         mark = {"PASS": "ok  ", "FAIL": "FAIL", "NOT_RUN": "skip"}[status]
         took = f" ({dur:.0f}s)" if dur >= 1 else ""
-        print(f"[{self.elapsed()}] [{mark}] {group}/{sid}{took} "
-              f"{detail.strip().splitlines()[0][:100] if detail.strip() else ''}", flush=True)
+        lines = detail.strip().splitlines()
+        print(f"[{self.elapsed()}] [{mark}] {group}/{sid}{took} {lines[0][:100] if lines else ''}", flush=True)
+        if status == FAIL:  # show why right away instead of only in the report
+            for ln in lines[1:9]:
+                print(f"           | {ln[:140]}", flush=True)
         return status
 
     # ---------- th-cli plumbing ----------
@@ -255,9 +263,8 @@ class Harness:
             args += ["--project-id", str(self.project_id)]
         if config:
             args += ["-c", config]
-        out, rc, why = self.pty_run(args, answers + self.m.get("default_prompt_answers", []), timeout)
-        with open(os.path.join(self.out_dir, f"{sid}.out"), "w") as f:
-            f.write(out)
+        out, rc, why = self.pty_run(args, answers + self.m.get("default_prompt_answers", []), timeout,
+                                    transcript=os.path.join(self.out_dir, f"{sid}.out"))
         log = (re.findall(r"Log output in:?\s*(\S+)", out) or [""])[-1]
         results = (re.findall(r"(?m)^Results:\s*(.+)$", out) or [""])[-1]
         if dut and not self.dut.is_alive():
@@ -274,48 +281,87 @@ class Harness:
                     f"{test}: {results or 'no results line'} (expected {expect}, got {actual})", time.time() - t0, log)
         return self.last_execution()
 
-    def pty_run(self, args: List[str], rules: List[dict], timeout: int, idle: int = 180) -> Tuple[str, int, str]:
+    @staticmethod
+    def file_tail(path: str) -> str:
+        try:
+            with open(path, "rb") as f:
+                f.seek(max(0, os.path.getsize(path) - 4096))
+                lines = [ln.strip() for ln in f.read().decode(errors="replace").splitlines() if ln.strip()]
+            return lines[-1] if lines else ""
+        except OSError:
+            return ""
+
+    def pty_run(self, args: List[str], rules: List[dict], timeout: int, idle: int = 180,
+                transcript: Optional[str] = None) -> Tuple[str, int, str]:
+        """Run th-cli in a pty, answering known prompts. th-cli prints little while a test runs (progress goes
+        to its own log file), so growth of that log file counts as activity for the idle check."""
         master, slave = pty.openpty()
         proc = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
         os.close(slave)
+        tfile = open(transcript, "w") if transcript else None
         buf, since_answer = "", 0
         start = last = beat = time.time()
-        why = ""
-        while True:
-            r, _, _ = select.select([master], [], [], 1.0)
-            if r:
-                try:
-                    chunk = os.read(master, 65536).decode(errors="replace")
-                except OSError:
-                    chunk = ""
-                if chunk:
-                    buf += strip(chunk)
-                    last = time.time()
-                    if PROMPT_TRIGGER in buf[since_answer:]:
-                        block = buf[since_answer:]
-                        num = self.answer_for(block, rules)
-                        if num is None:
-                            why = "UNHANDLED PROMPT (no answer rule matched): " + block[-300:].replace("\n", " | ")
-                            break
-                        os.write(master, (num + "\n").encode())
-                        since_answer = len(buf)
-            if proc.poll() is not None and not r:
-                break
-            if time.time() - start > timeout:
-                why = f"timeout after {timeout}s"
-                break
-            if time.time() - last > idle:
-                why = f"no output for {idle}s (waiting on an unknown prompt?)"
-                break
-            if time.time() - beat > 30:
-                beat = time.time()
-                tail = next((ln.strip() for ln in reversed(buf.splitlines()) if ln.strip()), "(no output yet)")
-                print(f"      [{self.elapsed()}] {self.progress} | step {int(beat - start)}s/{timeout}s | "
-                      f"last output: {tail[:90]}", flush=True)
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
-        os.close(master)
+        why, clean = "", False
+        cli_log, cli_log_size = None, -1
+        try:
+            while True:
+                r, _, _ = select.select([master], [], [], 1.0)
+                eof = False
+                if r:
+                    try:
+                        raw = os.read(master, 65536)
+                    except OSError:  # Linux: EIO once th-cli has exited and closed its end of the pty
+                        raw = b""
+                    # select() keeps reporting an exited pty as readable, so EOF must end the loop explicitly
+                    eof = raw == b""
+                    chunk = strip(raw.decode(errors="replace"))
+                    if chunk:
+                        buf += chunk
+                        last = time.time()
+                        if tfile:
+                            tfile.write(chunk)
+                            tfile.flush()
+                        if cli_log is None:
+                            m = re.search(r"Log output in:?\s*(\S+)", buf)
+                            cli_log = m.group(1) if m else None
+                        if PROMPT_TRIGGER in buf[since_answer:]:
+                            block = buf[since_answer:]
+                            num = self.answer_for(block, rules)
+                            if num is None:
+                                why = "UNHANDLED PROMPT (no answer rule matched): " + block[-300:].replace("\n", " | ")
+                                break
+                            os.write(master, (num + "\n").encode())
+                            since_answer = len(buf)
+                if cli_log and os.path.exists(cli_log):
+                    size = os.path.getsize(cli_log)
+                    if size != cli_log_size:
+                        cli_log_size, last = size, time.time()
+                if eof or (proc.poll() is not None and not r):
+                    break
+                if time.time() - start > timeout:
+                    why = f"timeout after {timeout}s"
+                    break
+                if time.time() - last > idle:
+                    why = f"no th-cli output and no log growth for {idle}s (waiting on an unknown prompt?)"
+                    break
+                if time.time() - beat > 30:
+                    beat = time.time()
+                    tail = (cli_log and self.file_tail(cli_log)) or next(
+                        (ln.strip() for ln in reversed(buf.splitlines()) if ln.strip()), "(no output yet)")
+                    print(f"      [{self.elapsed()}] {self.progress} | step {int(beat - start)}s/{timeout}s | "
+                          f"log {cli_log_size if cli_log_size >= 0 else 0}B | {tail[:90]}", flush=True)
+            clean = not why
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            os.close(master)
+            if tfile:
+                tfile.close()
+            if not clean:
+                # th-cli is gone but the backend keeps executing the test. Abort it so the next step does
+                # not fail with "Test Engine is busy".
+                self.cli(["abort-testing"], timeout=60)
         return buf, proc.returncode if proc.returncode is not None else -1, why
 
     def last_execution(self) -> Optional[int]:
@@ -453,10 +499,29 @@ class Harness:
 
     # ---------- cleanup + report ----------
     def cleanup(self) -> None:
-        self.dut.stop()
+        """Best effort. A second Ctrl-C must not abandon the remaining cleanup steps."""
+        def guarded(label: str, fn) -> None:
+            try:
+                fn()
+            except KeyboardInterrupt:
+                print(f"      cleanup interrupted at: {label}. Check leftovers (th-cli project list, ps for the DUT).", flush=True)
+        guarded("abort running test", lambda: self.cli(["abort-testing"], timeout=60))
+        guarded("stop DUT", self.dut.stop)
         for pid in [*self.extra_projects, self.project_id]:
             if pid is not None:
-                self.cli_step(f"cleanup-project-{pid}", "cleanup", ["project", "delete", "-i", str(pid), "-y"])
+                guarded(f"delete project {pid}", lambda pid=pid: self.cli_step(
+                    f"cleanup-project-{pid}", "cleanup", ["project", "delete", "-i", str(pid), "-y"]))
+
+    def by_category(self) -> Dict[str, List[dict]]:
+        cats: Dict[str, List[dict]] = {c: [] for c in CATEGORY_ORDER}
+        for s in self.steps:
+            cats.setdefault(CATEGORY.get(s["group"], "Harness"), []).append(s)
+        return {c: v for c, v in cats.items() if v}
+
+    @staticmethod
+    def cat_counts(steps: List[dict]) -> str:
+        n = {k: sum(1 for s in steps if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
+        return f"PASS {n[PASS]} / FAIL {n[FAIL]} / NOT_RUN {n[NOT_RUN]}"
 
     def report(self, version: str) -> int:
         fails = [s for s in self.steps if s["status"] == FAIL]
@@ -465,12 +530,19 @@ class Harness:
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         base = os.path.join(self.out_dir, f"sanity_{stamp}")
         counts = {k: sum(1 for s in self.steps if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
-        lines = [f"# TH sanity report - {version}", "", f"- Date: {stamp}", f"- Total time: {self.elapsed()}", f"- Mode: {'DRY RUN' if self.dry_run else 'FULL'}",
-                 f"- **Verdict: {'GO' if go else 'NO-GO'}**", f"- PASS {counts[PASS]} / FAIL {counts[FAIL]} / NOT_RUN {counts[NOT_RUN]}",
-                 f"- Live suites: {len(self.live)}", "", "| Group | Step | Status | Time s | Detail |", "|---|---|---|---|---|"]
-        for s in self.steps:
-            det = s["detail"].splitlines()[0][:140] if s["detail"] else ""
-            lines.append(f"| {s['group']} | {s['id']} | {s['status']} | {s['duration_s']} | {det.replace('|', '/')} |")
+        cats = self.by_category()
+        lines = [f"# TH sanity report - {version}", "", f"- Date: {stamp}", f"- Total time: {self.elapsed()}",
+                 f"- Mode: {'DRY RUN' if self.dry_run else 'FULL'}", f"- **Verdict: {'GO' if go else 'NO-GO'}**",
+                 f"- Live suites: {len(self.live)}", "", "## Summary by category", "",
+                 "| Category | PASS | FAIL | NOT_RUN |", "|---|---|---|---|"]
+        for c, st in cats.items():
+            n = {k: sum(1 for s in st if s["status"] == k) for k in (PASS, FAIL, NOT_RUN)}
+            lines.append(f"| {c} | {n[PASS]} | {n[FAIL]} | {n[NOT_RUN]} |")
+        for c, st in cats.items():
+            lines += ["", f"## {c}", "", "| Step | Status | Time s | Detail |", "|---|---|---|---|"]
+            for s in st:
+                det = s["detail"].splitlines()[0][:140] if s["detail"] else ""
+                lines.append(f"| {s['id']} | {s['status']} | {s['duration_s']} | {det.replace('|', '/')} |")
         if fails or unexpected:
             lines += ["", "## Needs attention"]
             for s in fails + unexpected:
@@ -479,8 +551,10 @@ class Harness:
             f.write("\n".join(lines) + "\n")
         with open(base + ".json", "w") as f:
             json.dump({"version": version, "verdict": "GO" if go else "NO-GO", "counts": counts, "steps": self.steps}, f, indent=2)
-        print(f"\nVerdict: {'GO' if go else 'NO-GO'}  (PASS {counts[PASS]}, FAIL {counts[FAIL]}, NOT_RUN {counts[NOT_RUN]}) "
-              f"in {self.elapsed()}")
+        print(f"\n===== Summary ({self.elapsed()}) =====")
+        for c, st in cats.items():
+            print(f"  {c:<14} {self.cat_counts(st)}")
+        print(f"Verdict: {'GO' if go else 'NO-GO'}")
         print(f"Report: {base}.md")
         return 0 if go else 1
 
@@ -506,21 +580,24 @@ def main() -> int:
         return 0
     version = a.version_label or (h.cli(["--version"])[1].strip().replace("\n", " ")[:200])
     try:
-        h.phase(1, "CLI smoke")
+        h.phase(1, "CLI commands")
         h.smoke()
         h.phase(2, "Coverage gate")
         h.coverage_gate()
-        h.phase(3, "One test per suite")
+        h.phase(3, "Test suites (one test per suite)")
         h.run_suites()
-        h.phase(4, "Custom YAML/Python tests")
+        h.phase(4, "Custom tests (YAML + Python)")
         h.custom()
-        h.phase(5, "test-run-execution commands")
+        h.phase(5, "CLI commands on executions")
         h.executions()
     except KeyboardInterrupt:
         h.record("interrupted", "harness", FAIL, "interrupted by user")
     finally:
         if not a.dry_run:  # dry run must never kill a DUT app the user is running
-            h.cleanup()
+            try:
+                h.cleanup()
+            except KeyboardInterrupt:
+                print("cleanup interrupted; writing report anyway", flush=True)
     return h.report(version)
 
 
