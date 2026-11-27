@@ -1,14 +1,25 @@
 import os
 import stat
+import subprocess
 import tempfile
+import time
 import unittest
 
 from fakes import FakeTh, make_session  # noqa: F401  (also sets sys.path)
 from th_sanity import prompts
-from th_sanity.dut import DutError, DutManager
+from th_sanity.dut import DutError, DutManager, list_processes, parse_ps
 from th_sanity.prompts import PromptDriver, answer_for, qr_discriminator
 from th_sanity.results import FAIL, NOT_RUN, PASS, Results
 
+def ps_usable() -> bool:
+    try:
+        list_processes()
+        return True
+    except DutError:
+        return False
+
+
+PS_OK = ps_usable()
 DEFAULTS = [
     {"match": "Should the DUT be commissioned", "choose": "(?i)^yes$"},
     {"match": "reuse the previous commissioning", "choose": "(?i)^no$"},
@@ -193,12 +204,122 @@ class Dut(unittest.TestCase):
         finally:
             m.stop()
 
+    # --- processes that are already running (never use a real app name: tests must not touch real apps)
+    def spawn(self, name=None):
+        """A process whose command line starts with the fake binary path, like a compiled app would."""
+        path = os.path.join(self.apps, name or self.NAME)
+        with open(path, "w") as f:
+            f.write('#!/bin/bash\nexec -a "$0" sleep 60\n')
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+        proc = subprocess.Popen([path])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        time.sleep(0.5)  # let exec replace the shell so `ps` shows the final command line
+        return proc
+
+    @unittest.skipUnless(PS_OK, "`ps` is not usable here")
+    def test_find_running_matches_the_executable_only(self):
+        proc = self.spawn()
+        decoy_file = os.path.join(self.apps, "notes", self.NAME)
+        os.makedirs(os.path.dirname(decoy_file))
+        open(decoy_file, "w").write("x")
+        decoy = subprocess.Popen(["tail", "-f", decoy_file])  # mentions the path but is not the app
+        self.addCleanup(lambda: (decoy.kill(), decoy.wait()))
+        time.sleep(0.3)
+        found = self.manager().find_running()
+        self.assertEqual([pid for pid, _ in found], [proc.pid])
+        self.assertIn(self.NAME, found[0][1])
+
+    @unittest.skipUnless(PS_OK, "`ps` is not usable here")
+    def test_find_running_is_empty_when_nothing_runs(self):
+        self.assertEqual(self.manager().find_running(), [])
+
+    @unittest.skipUnless(PS_OK, "`ps` is not usable here")
+    def test_find_running_ignores_the_managers_own_child(self):
+        self.binary('echo "mDNS service published: _matterc._udp"; exec -a "$0" sleep 60')
+        m = self.manager()
+        try:
+            m.start("d", fresh=True)
+            time.sleep(0.3)
+            self.assertEqual(m.find_running(), [])
+        finally:
+            m.stop()
+
+    @unittest.skipUnless(PS_OK, "`ps` is not usable here")
+    def test_stop_kills_a_leftover_app_but_not_a_process_that_only_mentions_it(self):
+        proc = self.spawn()
+        decoy_file = os.path.join(self.apps, "notes", self.NAME)
+        os.makedirs(os.path.dirname(decoy_file))
+        open(decoy_file, "w").write("x")
+        decoy = subprocess.Popen(["tail", "-f", decoy_file])
+        self.addCleanup(lambda: (decoy.kill(), decoy.wait()))
+        m = self.manager()
+        m.stop()
+        proc.wait(timeout=5)
+        self.assertIsNotNone(proc.returncode)
+        self.assertIsNone(decoy.poll())  # still running
+        self.assertEqual(m.find_running(), [])
+
+    # --- the same logic with an injected process list (works without `ps`)
+    def with_processes(self, rows, binary="chip-all-clusters-app"):
+        return DutManager({"d": {"binary": binary}}, self.apps, self.logs, lister=lambda: rows)
+
+    def test_running_apps_are_found_by_the_start_of_their_command_line(self):
+        rows = [(10, "/home/u/apps/chip-all-clusters-app --wifi"), (11, "./chip-all-clusters-app"),
+                (12, "tail -f /home/u/apps/chip-all-clusters-app"), (13, "vim chip-all-clusters-app.sh"),
+                (14, "/x/not-chip-all-clusters-app"), (15, "python3 run_sanity.py --manifest chip-all-clusters-app")]
+        found = self.with_processes(rows).find_running()
+        self.assertEqual([pid for pid, _ in found], [10, 11])
+
+    def test_the_harness_itself_and_its_own_child_are_never_reported(self):
+        rows = [(os.getpid(), "chip-all-clusters-app"), (777, "chip-all-clusters-app"), (778, "chip-all-clusters-app")]
+        m = self.with_processes(rows)
+        m.proc = type("P", (), {"pid": 777})()
+        self.assertEqual([pid for pid, _ in m.find_running()], [778])
+
+    def test_a_failing_process_listing_is_an_error_not_an_empty_list(self):
+        def boom():
+            raise DutError("cannot list running processes with `ps`: nope")
+        with self.assertRaises(DutError):
+            DutManager({"d": {"binary": "x"}}, self.apps, self.logs, lister=boom).find_running()
+
+    def test_parse_ps(self):
+        text = "  101 /sbin/init splash\n 2002 ./chip-all-clusters-app --wifi\nnot a row\n"
+        self.assertEqual(parse_ps(text), [(101, "/sbin/init splash"), (2002, "./chip-all-clusters-app --wifi")])
+
     def test_missing_binary_and_unknown_profile(self):
         m = self.manager()
         with self.assertRaises(DutError):
             m.start("d")
         with self.assertRaises(DutError):
             m.start("nope")
+
+
+# Lines taken from `ps -aux` on the TH host (Raspberry Pi), reduced to the `ps -eo pid=,args=` form the harness reads.
+REAL_PS = """
+    1 /sbin/init fixrtc
+  825 /usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal
+ 1051 /usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+ 4621 -bash
+ 6234 /home/ubuntu/.vscode-server/cli/servers/Stable-2242/server/node /home/ubuntu/.vscode-server/cli/servers/Stable-2242/server/out/server-main.js --connection-token=remotessh
+527097 traefik traefik --providers.docker --providers.docker.constraints=Label(`traefik.constraint-label-stack`, `chip-test-harness.com`) --providers.docker.exposedbydefault=false
+527273 python3 ./app/main.py
+529165 postgres: postgres app fd00:6d61:7474:6572::4(59086) idle
+730942 ./chip-all-clusters-app
+731306 sleep 180
+731529 ps -aux
+"""
+
+
+class RealHostProcessList(unittest.TestCase):
+    def test_only_the_chip_app_in_a_real_process_list_is_found(self):
+        m = DutManager({"all-clusters": {"binary": "chip-all-clusters-app"}}, "/nonexistent", "/nonexistent",
+                       lister=lambda: parse_ps(REAL_PS))
+        self.assertEqual(m.find_running(), [(730942, "./chip-all-clusters-app")])
+
+    def test_the_backend_running_in_docker_is_not_mistaken_for_a_dut(self):
+        m = DutManager({"all-clusters": {"binary": "chip-all-clusters-app"}}, "/nonexistent", "/nonexistent",
+                       lister=lambda: parse_ps(REAL_PS))
+        self.assertNotIn(527273, [pid for pid, _ in m.find_running()])
 
 
 class ResultsVerdict(unittest.TestCase):

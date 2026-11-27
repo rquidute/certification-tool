@@ -25,10 +25,11 @@ import json
 import os
 import re
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from . import console
 from .console import paint
+from .dut import DutError
 from .phases import abort, cli_commands, coverage, custom, executions, preclean, suites
 from .report import write_report
 from .results import FAIL
@@ -44,7 +45,7 @@ PHASES = [
 ]
 
 
-def confirm_start() -> bool:
+def confirm_start(existing: Optional[List[Tuple[int, str]]] = None) -> bool:
     """Ask the operator to close the TH UI and wait for confirmation. The TH sends every test prompt to all
     connected web clients, so an open UI can answer or disturb the prompts the harness answers over the CLI."""
     print(f"\n{console.rule(72)}")
@@ -52,7 +53,12 @@ def confirm_start() -> bool:
     print(f"  {paint('1.', 'bold')} Close the TH web UI (every browser tab). The TH sends test prompts to all")
     print("     connected clients, so a click in the UI can answer or disturb a prompt.")
     print(f"  {paint('2.', 'bold')} Do not start other test runs. The harness uses the test engine exclusively.")
-    print(f"  {paint('3.', 'bold')} Any running chip-all-clusters-app is stopped; the harness starts its own.")
+    if existing:
+        print(f"  {paint('3.', 'bold')} {paint('These running DUT apps will be stopped (--kill-existing) and not restored:', 'yellow')}")
+        for pid, cmd in existing:
+            print(f"       pid {pid}: {cmd[:90]}")
+    else:
+        print(f"  {paint('3.', 'bold')} No DUT app is running. The harness starts its own and stops it at the end.")
     print(console.rule(72))
     try:
         answer = input(paint(" Press Enter once the UI is closed to continue, or type n to cancel: ", "bold")).strip().lower()
@@ -69,6 +75,8 @@ def build_parser(default_manifest: str) -> argparse.ArgumentParser:
     ap.add_argument("--dry-run", action="store_true", help="coverage gate and read-only CLI commands only")
     ap.add_argument("--version-label", default="", help="TH version string for the report header and the run folder name")
     ap.add_argument("--yes", action="store_true", help="skip the 'close the TH UI' confirmation (unattended runs)")
+    ap.add_argument("--kill-existing", action="store_true",
+                    help="stop a DUT app (e.g. chip-all-clusters-app) that is already running instead of refusing to start")
     ap.add_argument("--no-preclean", action="store_true", help="do not delete leftover sanity projects from earlier sessions")
     ap.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                     help="colored output (auto = only on a terminal and when NO_COLOR is not set)")
@@ -94,18 +102,34 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"{sid!r}: {len(tests)} tests, e.g. {sorted(tests)[:3]}")
         return 0
 
+    # A DUT app that is already running would be killed on the first test. Never do that silently.
+    try:
+        existing = [] if a.dry_run else s.dut.find_running()
+    except DutError as e:
+        print(f" {e}\n Cannot tell whether a DUT app is already running, so nothing was started.", file=sys.stderr)
+        return 2
+    if existing and not a.kill_existing:
+        print(paint(" A DUT app is already running; the harness would have to kill it:", "bold", "yellow"), file=sys.stderr)
+        for pid, cmd in existing:
+            print(f"   pid {pid}: {cmd[:100]}", file=sys.stderr)
+        print(" Stop it yourself, or rerun with --kill-existing to let the harness stop it (it is not restored).\n"
+              " Nothing was changed.", file=sys.stderr)
+        return 2
+
     # Dry run only reads, so an open UI cannot interfere and no confirmation is needed.
     if not a.dry_run and not a.yes:
         if not sys.stdin.isatty():
             print("Not running in a terminal, so the 'close the TH UI' confirmation cannot be asked. "
                   "Close the UI yourself and pass --yes.", file=sys.stderr)
             return 2
-        if not confirm_start():
+        if not confirm_start(existing):
             print(paint("Cancelled. Nothing was changed.", "yellow"))
             return 2
 
     version = a.version_label or s.th.run(["--version"])[1].strip().replace("\n", " ")[:200]
     try:
+        if existing:
+            preclean.stop_existing_dut(s, existing)
         if not a.no_preclean:
             preclean.preclean(s)
         for n, (title, fn) in enumerate(PHASES, 1):

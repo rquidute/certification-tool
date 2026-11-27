@@ -1,6 +1,6 @@
 """Pre-flight removal of projects left by earlier sessions, and the final cleanup of this one."""
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .. import console
 from ..results import FAIL, PASS
@@ -60,3 +60,15 @@ def final_cleanup(s: Session) -> None:
         if pid is not None:
             guarded(f"delete project {pid}", lambda pid=pid: s.cli_step(
                 f"cleanup-project-{pid}", "cleanup", ["project", "delete", "-i", str(pid), "-y"]))
+
+
+def stop_existing_dut(s: Session, found: List[Tuple[int, str]]) -> None:
+    """--kill-existing: stop DUT apps that were already running, and say exactly which."""
+    names = "; ".join(f"pid {pid}: {cmd[:80]}" for pid, cmd in found)
+    s.dut.stop()
+    left = s.dut.find_running()
+    if left:
+        s.record("stop-existing-dut", "cleanup", FAIL, f"still running after stop: " + "; ".join(f"pid {p}" for p, _ in left)
+                 + " (owned by another user, or started as root?)")
+    else:
+        s.record("stop-existing-dut", "cleanup", PASS, f"stopped (--kill-existing): {names}")

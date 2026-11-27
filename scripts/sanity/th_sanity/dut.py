@@ -17,7 +17,7 @@ import re
 import signal
 import subprocess
 import time
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 READY_FRESH = r"mDNS service published: _matterc\._udp"
 READY_REUSE = r"mDNS service published: _matter\._tcp"
@@ -26,6 +26,32 @@ DEFAULT_WIPE = "/tmp/chip_* /tmp/repl-storage.json"
 
 class DutError(RuntimeError):
     pass
+
+
+def process_pattern(binary: str) -> str:
+    """Regex (valid as Python and POSIX ERE) matching a process whose command line STARTS with the binary,
+    e.g. './chip-all-clusters-app --wifi' or '/home/u/apps/chip-all-clusters-app'. Anchoring at the start keeps
+    `tail -f .../chip-all-clusters-app` or an editor that merely mentions the path from being matched or killed."""
+    escaped = re.sub(r"([.+*?^${}()|\[\]\\])", r"\\\1", binary)
+    return rf"^([^ ]*/)?{escaped}( |$)"
+
+
+def parse_ps(text: str) -> List[Tuple[int, str]]:
+    """Parse `ps -eo pid=,args=` output into (pid, command line)."""
+    rows = []
+    for line in text.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        if pid.isdigit():
+            rows.append((int(pid), args.strip()))
+    return rows
+
+
+def list_processes() -> List[Tuple[int, str]]:
+    try:
+        done = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise DutError(f"cannot list running processes with `ps`: {e}") from e
+    return parse_ps(done.stdout)
 
 
 def log_tail(path: Optional[str], lines: int = 15) -> str:
@@ -37,7 +63,9 @@ def log_tail(path: Optional[str], lines: int = 15) -> str:
 
 
 class DutManager:
-    def __init__(self, profiles: Dict[str, dict], apps_dir: str, log_dir: str):
+    def __init__(self, profiles: Dict[str, dict], apps_dir: str, log_dir: str,
+                 lister: Callable[[], List[Tuple[int, str]]] = list_processes):
+        self._lister = lister
         self.profiles = profiles
         self.apps_dir = os.path.expanduser(apps_dir)
         self.log_dir = log_dir
@@ -57,11 +85,16 @@ class DutManager:
         self.proc = None
         # Also catch apps left over from a previous (crashed) harness run. `pkill -x` cannot be used:
         # it refuses process names over 15 characters (chip-all-clusters-app is 21) and matches nothing.
-        # Match the command line instead, anchored to the executable path so unrelated processes
-        # that merely mention the name (editors, tail, grep) are not hit.
         for prof in self.profiles.values():
-            subprocess.run(["pkill", "-9", "-f", rf"(^|/){re.escape(prof['binary'])}( |$)"], check=False)
+            subprocess.run(["pkill", "-9", "-f", process_pattern(prof["binary"])], check=False)
         time.sleep(1)
+
+    def find_running(self) -> List[Tuple[int, str]]:
+        """(pid, command line) of every running DUT app of any profile, other than this harness's own child."""
+        patterns = [re.compile(process_pattern(p["binary"])) for p in self.profiles.values()]
+        own = {os.getpid(), self.proc.pid if self.proc else -1}
+        return [(pid, args) for pid, args in self._lister()
+                if pid not in own and any(pat.search(args) for pat in patterns)]
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
