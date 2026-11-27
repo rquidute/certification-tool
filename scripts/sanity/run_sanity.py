@@ -38,6 +38,21 @@ from dut import DutError, DutManager  # noqa: E402
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PASS, FAIL, NOT_RUN = "PASS", "FAIL", "NOT_RUN"
 PROMPT_TRIGGER = "Please enter a number for an option above"
+# th-cli text prompts end with 'Enter value: ' or 'Enter value [default: x]: ' and no newline
+TEXT_PROMPT = re.compile(r"Enter value(?: \[default: [^\]]*\])?: $")
+BASE38 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-."
+
+
+def qr_discriminator(qr: str) -> int:
+    """12-bit discriminator inside a Matter QR payload (MT:...). Bit layout per the Matter spec:
+    version 3, vendor 16, product 16, flow 2, rendezvous 8, discriminator 12, passcode 27 (LSB first)."""
+    body, raw, i = qr[3:], bytearray(), 0
+    while i < len(body):
+        chunk = body[i:i + 5]
+        i += len(chunk)
+        value = sum(BASE38.index(c) * 38 ** k for k, c in enumerate(chunk))
+        raw += value.to_bytes({5: 3, 4: 2, 2: 1}[len(chunk)], "little")
+    return (int.from_bytes(raw, "little") >> (3 + 16 + 16 + 2 + 8)) & 0xFFF
 # Report categories. Coverage is a pre-flight gate (is every suite accounted for?), not a test result, so it
 # is counted on its own and never mixed into the test PASS numbers.
 CATEGORY = {"cli": "CLI commands", "executions": "CLI commands", "suites": "Test suites",
@@ -236,6 +251,21 @@ class Harness:
         self.record("live-suite-summary", g, PASS, f"{len(self.live)} live suites, {len(listed)} covered, {len(excluded)} excluded")
 
     # ---------- 3. run one test through run-tests (pty, prompt-aware) ----------
+    def resolve_text(self, value: str) -> Optional[str]:
+        """Text answers may be literals or tokens: @dut_qr = the QR code the DUT printed at startup,
+        @qr_disc = the discriminator (hex) inside that QR code."""
+        if value == "@dut_qr":
+            try:
+                with open(self.dut.log_path or "", errors="replace") as f:
+                    m = re.search(r"SetupQRCode: \[(MT:[^\]]+)\]", f.read())
+            except OSError:
+                m = None
+            self.last_qr = m.group(1) if m else None
+            return self.last_qr
+        if value == "@qr_disc":
+            return hex(qr_discriminator(self.last_qr)) if getattr(self, "last_qr", None) else None
+        return value
+
     def answer_for(self, block: str, rules: List[dict]) -> Optional[str]:
         opts = re.findall(r"(?m)^\s*(\d+)\s*[:=\-\)]?\s+(.+?)\s*$", block)
         for rule in rules:
@@ -246,7 +276,8 @@ class Harness:
         return None
 
     def run_test(self, sid: str, group: str, test: str, expect: str, answers: List[dict], dut: Optional[str],
-                 dut_start: str, config: Optional[str] = None, timeout: Optional[int] = None) -> Optional[int]:
+                 dut_start: str, config: Optional[str] = None, timeout: Optional[int] = None,
+                 text_answers: Optional[List[dict]] = None) -> Optional[int]:
         t0 = time.time()
         timeout = timeout or self.m.get("default_run_timeout_s", 900)
         if dut:
@@ -264,7 +295,7 @@ class Harness:
         if config:
             args += ["-c", config]
         out, rc, why = self.pty_run(args, answers + self.m.get("default_prompt_answers", []), timeout,
-                                    transcript=os.path.join(self.out_dir, f"{sid}.out"))
+                                    transcript=os.path.join(self.out_dir, f"{sid}.out"), text_rules=text_answers)
         log = (re.findall(r"Log output in:?\s*(\S+)", out) or [""])[-1]
         results = (re.findall(r"(?m)^Results:\s*(.+)$", out) or [""])[-1]
         if dut and not self.dut.is_alive():
@@ -292,7 +323,7 @@ class Harness:
             return ""
 
     def pty_run(self, args: List[str], rules: List[dict], timeout: int, idle: int = 180,
-                transcript: Optional[str] = None) -> Tuple[str, int, str]:
+                transcript: Optional[str] = None, text_rules: Optional[List[dict]] = None) -> Tuple[str, int, str]:
         """Run th-cli in a pty, answering known prompts. th-cli prints little while a test runs (progress goes
         to its own log file), so growth of that log file counts as activity for the idle check."""
         master, slave = pty.openpty()
@@ -324,7 +355,17 @@ class Harness:
                         if cli_log is None:
                             m = re.search(r"Log output in:?\s*(\S+)", buf)
                             cli_log = m.group(1) if m else None
-                        if PROMPT_TRIGGER in buf[since_answer:]:
+                        if TEXT_PROMPT.search(buf[since_answer:]):
+                            block = buf[since_answer:]
+                            ans = next((self.resolve_text(r_["value"]) for r_ in (text_rules or [])
+                                        if re.search(r_["match"], block)), None)
+                            if ans is None:
+                                why = "UNHANDLED TEXT PROMPT (no text_answers rule matched, or its value could " \
+                                      "not be resolved): " + block[-300:].replace("\n", " | ")
+                                break
+                            os.write(master, (ans + "\n").encode())
+                            since_answer = len(buf)
+                        elif PROMPT_TRIGGER in buf[since_answer:]:
                             block = buf[since_answer:]
                             num = self.answer_for(block, rules)
                             if num is None:
@@ -400,7 +441,7 @@ class Harness:
             n = len(self.steps)
             eid = self.run_test(f"run-{sid}", "suites", s["test"], s.get("expect", "pass"),
                                 s.get("prompt_answers", []), s.get("dut"), s.get("dut_start", "fresh"),
-                                config=self.abs_path(s.get("config")))
+                                config=self.abs_path(s.get("config")), text_answers=s.get("text_answers"))
             done[sid] = self.steps[-1]["status"] if len(self.steps) > n else FAIL
             if eid and done[sid] == PASS:
                 self.exec_ids[sid] = eid

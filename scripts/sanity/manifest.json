@@ -14,7 +14,8 @@
   },
   "suites": [
     {"id": "yaml-chip-tool", "suite": "FirstChipToolSuite", "test": "TC-ACE-1.1", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
-    {"id": "onboarding-payload", "suite": "OnboardingPayloadTestSuite", "test": "TC-DD-1.1", "dut": null, "expect": "pass"},
+    {"id": "onboarding-payload", "suite": "OnboardingPayloadTestSuite", "test": "TC-DD-1.1", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass",
+     "text_answers": [{"match": "QR code payload", "value": "@dut_qr"}, {"match": "12-bit discriminator", "value": "@qr_disc"}]},
     {"id": "python-auto-commissioning", "suite": "Python Testing Suite - Auto commissioning", "test": "TC_ACE_1_3", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
     {"id": "python-mandatories", "suite": "Python Testing Suite - Mandatories", "test": "TC_IDM_10_2", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
     {"id": "python-no-auto-commissioning", "suite": "Python Testing Suite - No auto commissioning", "test": "TC_CGEN_2_5", "dut": "all-clusters", "dut_start": "fresh", "expect": "pass"},
