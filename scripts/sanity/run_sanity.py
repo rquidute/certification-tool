@@ -834,6 +834,25 @@ class Harness:
         return 0 if go else 1
 
 
+def confirm_start() -> bool:
+    """Ask the operator to close the TH UI and wait for confirmation. The TH sends every test prompt to all
+    connected web clients, so an open UI can answer or disturb the prompts the harness answers over the CLI."""
+    rule = paint(("─" if UNICODE else "-") * 72, "gray")
+    print(f"\n{rule}")
+    print(paint(" Before starting", "bold", "yellow"))
+    print(f"  {paint('1.', 'bold')} Close the TH web UI (every browser tab). The TH sends test prompts to all")
+    print("     connected clients, so a click in the UI can answer or disturb a prompt.")
+    print(f"  {paint('2.', 'bold')} Do not start other test runs. The harness uses the test engine exclusively.")
+    print(f"  {paint('3.', 'bold')} Any running chip-all-clusters-app is stopped; the harness starts its own.")
+    print(rule)
+    try:
+        answer = input(paint(" Press Enter once the UI is closed to continue, or type n to cancel: ", "bold")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in ("", "y", "yes", "c", "continue")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     here = os.path.dirname(os.path.abspath(__file__))
@@ -841,6 +860,7 @@ def main() -> int:
     ap.add_argument("--out-dir", default="sanity_reports")
     ap.add_argument("--dry-run", action="store_true", help="coverage gate and read-only CLI commands only")
     ap.add_argument("--version-label", default="", help="TH version string for the report header")
+    ap.add_argument("--yes", action="store_true", help="skip the 'close the TH UI' confirmation (unattended runs)")
     ap.add_argument("--no-preclean", action="store_true", help="do not delete leftover sanity projects from earlier sessions")
     ap.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                     help="colored output (auto = only on a terminal and when NO_COLOR is not set)")
@@ -858,6 +878,15 @@ def main() -> int:
         for sid, tests in sorted(h.live.items()):
             print(f"{sid!r}: {len(tests)} tests, e.g. {sorted(tests)[:3]}")
         return 0
+    # Dry run only reads, so an open UI cannot interfere and no confirmation is needed.
+    if not a.dry_run and not a.yes:
+        if not sys.stdin.isatty():
+            print("Not running in a terminal, so the 'close the TH UI' confirmation cannot be asked. "
+                  "Close the UI yourself and pass --yes.", file=sys.stderr)
+            return 2
+        if not confirm_start():
+            print(paint("Cancelled. Nothing was changed.", "yellow"))
+            return 2
     version = a.version_label or (h.cli(["--version"])[1].strip().replace("\n", " ")[:200])
     try:
         if not a.no_preclean:
