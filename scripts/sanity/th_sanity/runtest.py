@@ -6,6 +6,7 @@ import time
 from typing import List, Optional
 
 from . import console
+from .digest import failure_digest
 from .results import FAIL, PASS
 from .session import Session, shell_join
 
@@ -52,7 +53,11 @@ def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: 
                  command=cmd, dut_command=dut_cmd)
         return s.th.last_execution()
     actual = "pass" if rc == 0 else "fail"
-    s.record(sid, group, PASS if actual == expect else FAIL,
-             f"{test}: {results or 'no results line'} (expected {expect}, got {actual})", time.time() - t0, log,
+    detail = f"{test}: {results or 'no results line'} (expected {expect}, got {actual})"
+    if actual != expect:  # say WHY on the console and in the report, not only that it failed
+        digest = failure_digest(out)
+        if digest:
+            detail += "\nfailing lines in the th-cli output:\n" + "\n".join(digest)
+    s.record(sid, group, PASS if actual == expect else FAIL, detail, time.time() - t0, log,
              command=cmd, dut_command=dut_cmd)
     return s.th.last_execution()

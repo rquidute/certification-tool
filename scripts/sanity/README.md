@@ -128,6 +128,10 @@ Every step also records **the command line it ran** (shell-quoted, so it can be 
 DUT app was started**. They are in `report.json` (`command`, `dut_command`), in a *Command* column of `report.md`, in the
 *Needs attention* section, and on the console right under a failing step.
 
+When a test fails (not an infrastructure error), the step also carries a digest of the failing lines from the `th-cli`
+output (`[FAILED]` / `[ERROR]` tree entries, `ERROR` log lines, tracebacks), so the reason is visible without opening
+`transcript.out`.
+
 The console and `report.md` group results into **Test suites**, **Custom tests**, **CLI commands**, **Coverage gate**
 and **Harness**. Coverage checks are counted separately: they are a pre-flight gate, not test results.
 
@@ -266,6 +270,7 @@ scripts/sanity/
     ├── prompts.py           PromptDriver: pty runner that answers th-cli's prompts
     ├── dut.py               DutManager: start/stop the DUT, readiness, find running apps
     ├── runtest.py           run_test(): one test case through `th-cli run-tests`
+    ├── digest.py            failing lines of a th-cli run, shown with a failed test
     ├── report.py            report.md / report.json, console summary, `latest` link
     └── phases/
         ├── preclean.py      stale-project removal, stop-existing-dut, final cleanup
@@ -370,8 +375,11 @@ the factory-reset `wipe` is disabled in tests, so they never touch a real app or
 * **`execution-pics-export`** passes on the documented 404 "No PICS were used"; the export path itself is then **not
   exercised** (the step detail says so).
 * **File-upload prompts are always skipped.** A manual test that needs a real file will fail visibly.
-* **Reuse readiness** (`_matter._tcp` / quiet log) is inferred, not observed on every TH version. If the reuse step
-  fails to start, read that step's `dut.log`.
+* **Reuse readiness** was confirmed on the Pi: a device that kept its fabric announces `_matter._tcp`, not
+  `_matterc._udp`. If a reuse start ever fails, read that step's `dut.log` (the quiet-log fallback exists for other builds).
+* **`th-cli project logs` times out on a project with several executions** (`ReadTimeout` after about 6 s). All `project`
+  commands share a helper that builds the HTTP client with the default timeout, while rescan, execution import/export
+  and abort set 30-120 s; `project logs` even prints "this may take a while". Suspected CLI bug; the step fails on purpose.
 * **`th-cli` can report an incomplete run** ("only 0 of 1 selected test case(s) have results", "backend couldn't send
   all of the run's log records") even when the test shows `[PASSED]`. The harness counts that as FAIL (INFRA). It looks
   like a TH/CLI streaming flake, not a harness problem, and it is deliberately not retried or hidden.

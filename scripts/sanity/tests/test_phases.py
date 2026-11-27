@@ -571,6 +571,37 @@ class CommandLines(unittest.TestCase):
         self.assertEqual(row["dut_command"], "/home/u/apps/d-app --wifi")
 
 
+class FailureDigest(unittest.TestCase):
+    OUT = ("Test Run [EXECUTING]\n  - Python Testing Suite [EXECUTING]\n"
+           "    - Step 1 [PASSED]\n    - Step 2: read attribute [FAILED]\n"
+           "2026-11-27 ERROR | Attribute 0x1234 expected 3 got 5\n2026-11-27 ERROR | Attribute 0x1234 expected 3 got 5\n"
+           "Traceback (most recent call last):\nAssertionError: boom\nResults: 1 failed\n")
+
+    def test_digest_keeps_failing_lines_once_and_drops_the_summary_line(self):
+        from th_sanity.digest import failure_digest
+        d = failure_digest(self.OUT)
+        self.assertEqual(d, ["    - Step 2: read attribute [FAILED]", "2026-11-27 ERROR | Attribute 0x1234 expected 3 got 5",
+                             "Traceback (most recent call last):", "AssertionError: boom"])
+
+    def test_digest_is_limited_and_empty_when_nothing_failed(self):
+        from th_sanity.digest import failure_digest
+        self.assertEqual(len(failure_digest("\n".join(f"line {i} ERROR" for i in range(50)), limit=5)), 5)
+        self.assertEqual(failure_digest("all fine\nResults: 1 passed"), [])
+
+    def test_a_failed_test_explains_itself_in_the_step_detail(self):
+        s = make_session(prompts=FakePrompts((self.OUT, 1, "")))
+        run_test(s, "run-x", "suites", "TC-1", "pass", [], None, "fresh")
+        detail = next(x["detail"] for x in s.results.steps if x["id"] == "run-x")
+        self.assertIn("failing lines in the th-cli output:", detail)
+        self.assertIn("Step 2: read attribute [FAILED]", detail)
+
+    def test_a_passing_or_expected_failure_gets_no_digest(self):
+        for rc, expect in ((0, "pass"), (1, "fail")):
+            s = make_session(prompts=FakePrompts((self.OUT, rc, "")))
+            run_test(s, "run-x", "suites", "TC-1", expect, [], None, "fresh")
+            self.assertNotIn("failing lines", s.results.steps[0]["detail"])
+
+
 class Report(unittest.TestCase):
     def test_go_report_files_latest_pointer_and_exit_code(self):
         root = tempfile.mkdtemp()

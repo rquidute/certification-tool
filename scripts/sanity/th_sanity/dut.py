@@ -134,14 +134,14 @@ class DutManager:
             with open(self.log_path, errors="replace") as f:
                 text = f.read()
             if marker.search(text):
-                self.ready_how = f"marker {marker.pattern!r}"
+                self.ready_how = f"marker '{marker.pattern}'"
                 return
             if len(text) != size:
                 size, last_growth = len(text), time.time()
             elif not fresh and size > 0 and time.time() - last_growth >= quiet_s:
-                self.ready_how = f"log quiet for {quiet_s}s (no {marker.pattern!r} line; device already commissioned?)"
+                self.ready_how = f"log quiet for {quiet_s}s (no '{marker.pattern}' line; device already commissioned?)"
                 return
             time.sleep(1)
         self.stop()
-        raise DutError(f"{prof['binary']} not ready within {timeout}s (waiting for {marker.pattern!r}), see {self.log_path}\n"
+        raise DutError(f"{prof['binary']} not ready within {timeout}s (waiting for '{marker.pattern}'), see {self.log_path}\n"
                        f"last log lines:\n{log_tail(self.log_path)}")
