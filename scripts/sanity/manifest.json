@@ -26,6 +26,7 @@
      "prompt_answers": [{"match": "(?i)reuse|previous commissioning", "choose": "(?i)^yes$"}]}
   ],
   "abort_run": {"from": "python-auto-commissioning", "after_s": 8},
+  "cleanup": {"project_name_regex": "^sanity-(?:harness-)?\\d{9,}(?:-renamed)?(?:[ _(\\-].*)?$", "max_delete": 25},
   "excluded": [
     {"suite": "FirstAppSuite", "reason": "Simulated YAML (DUT is chip-app run by the TH); needs an external controller to commission it, not automatable here"},
     {"suite": "FirstManualSuite", "reason": "Manual tests require a human"}

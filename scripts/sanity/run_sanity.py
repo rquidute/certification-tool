@@ -39,6 +39,10 @@ from dut import DutError, DutManager  # noqa: E402
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PASS, FAIL, NOT_RUN = "PASS", "FAIL", "NOT_RUN"
 PROMPT_TRIGGER = "Please enter a number for an option above"
+# Projects the harness creates: sanity-harness-<epoch>[-renamed], plus the older sanity-<epoch>[-renamed] form and
+# whatever suffix `project import` appends to a copy. Anchored, and requires a 9+ digit epoch, so a project that
+# merely starts with "sanity" (e.g. "sanity-checks") is never matched.
+DEFAULT_PROJECT_REGEX = r"^sanity-(?:harness-)?\d{9,}(?:-renamed)?(?:[ _(\-].*)?$"
 
 # ---- console styling (standard library only). Auto-off when not a terminal or when NO_COLOR is set.
 USE_COLOR = False
@@ -201,6 +205,39 @@ class Harness:
         row = d if isinstance(d, dict) and "state" in d else (items(d)[0] if items(d) else {})
         return str(row.get("state")).lower() if row.get("state") is not None else None
 
+    # ---------- 0. pre-flight cleanup ----------
+    def stale_projects(self) -> Optional[List[dict]]:
+        cfg = self.m.get("cleanup", {})
+        rx = re.compile(cfg.get("project_name_regex", DEFAULT_PROJECT_REGEX))
+        data = self.cli_json(["project", "list", "--json"])
+        if data is None:
+            return None
+        return [p for p in items(data) if isinstance(p.get("name"), str) and p.get("id") is not None and rx.match(p["name"])]
+
+    def preclean(self) -> None:
+        """Remove projects left behind by earlier sanity sessions (crash, Ctrl-C). Only names matching the
+        harness's own pattern are touched; a user's projects are never deleted. Nothing is deleted in a dry run."""
+        g = "cleanup"
+        print(f"\n{self.stamp()} " + paint("Pre-flight", "bold", "cyan") + " " + paint("stale sanity projects", "bold"), flush=True)
+        stale = self.stale_projects()
+        if stale is None:
+            self.record("preclean-list-projects", g, FAIL, "could not read `project list --json`")
+            return
+        if not stale:
+            self.record("preclean-projects", g, PASS, "no stale sanity projects")
+            return
+        names = ", ".join(f"{p['id']}:{p['name']}" for p in stale)
+        limit = self.m.get("cleanup", {}).get("max_delete", 25)
+        if len(stale) > limit:
+            self.record("preclean-projects", g, FAIL, f"{len(stale)} projects match the cleanup pattern (limit {limit}); "
+                        f"refusing to delete them. Check cleanup.project_name_regex. Matches: {names}")
+            return
+        if self.dry_run:
+            self.record("preclean-projects", g, PASS, f"dry run: would delete {len(stale)}: {names}")
+            return
+        for p in stale:
+            self.cli_step(f"preclean-project-{p['id']}", g, ["project", "delete", "-i", str(p["id"]), "-y"])
+
     # ---------- 1. CLI smoke ----------
     def smoke(self) -> None:
         g = "cli"
@@ -213,7 +250,7 @@ class Harness:
         self.cli_step("project-list", g, ["project", "list", "--json"])
         if self.dry_run:
             return
-        name = f"sanity-{int(time.time())}"
+        name = f"sanity-harness-{int(time.time())}"
         good, _ = self.cli_step("project-create", g, ["project", "create", "-n", name])
         if good:
             self.project_id = self.find_project(name)
@@ -804,6 +841,7 @@ def main() -> int:
     ap.add_argument("--out-dir", default="sanity_reports")
     ap.add_argument("--dry-run", action="store_true", help="coverage gate and read-only CLI commands only")
     ap.add_argument("--version-label", default="", help="TH version string for the report header")
+    ap.add_argument("--no-preclean", action="store_true", help="do not delete leftover sanity projects from earlier sessions")
     ap.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                     help="colored output (auto = only on a terminal and when NO_COLOR is not set)")
     ap.add_argument("--list-suites", action="store_true", help="print live suites (public_id, size, sample tests) and exit")
@@ -822,6 +860,8 @@ def main() -> int:
         return 0
     version = a.version_label or (h.cli(["--version"])[1].strip().replace("\n", " ")[:200])
     try:
+        if not a.no_preclean:
+            h.preclean()
         h.phase(1, "CLI commands")
         h.smoke()
         h.phase(2, "Coverage gate")
