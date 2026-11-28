@@ -81,7 +81,7 @@ One test per suite (`suites[]`):
 | `yaml-manual` | FirstManualSuite | `TC-ACT-2.1` | none (every prompt accepted as PASS) |
 | `onboarding-payload` | OnboardingPayloadTestSuite | `TC-DD-1.1` | all-clusters (QR code taken from the DUT's log) |
 | `python-auto-commissioning` | Python Testing Suite - Auto commissioning | `TC_ACE_1_3` | all-clusters |
-| `python-mandatories` | Python Testing Suite - Mandatories | `TC_IDM_10_2` | all-clusters |
+| `python-mandatories` | Python Testing Suite - Mandatories | `TC_IDM_12_1` | all-clusters (wildcard read + device dump, no conformance judgement) |
 | `python-no-auto-commissioning` | Python Testing Suite - No auto commissioning | `TC_CGEN_2_5` | all-clusters |
 | `python-old-format` | Python Testing Suite - Old script format | `TC_ACE_1_2` | all-clusters |
 | `python-old-format-reuse-credentials` | Python Testing Suite - Old script format | `TC_ACE_1_2` | all-clusters, **reuse** credentials |
@@ -452,9 +452,13 @@ the factory-reset `wipe` is disabled in tests, so they never touch a real app or
   (`config.py`) and `container_manager.py` reads it; commit `fed8dd8` (#414) removed both on the v2.17 work. The error
   means the running backend has the reader without the setting, i.e. mixed v2.16 / v2.17 code or a stale image. Check
   the deployment (`th-cli --version`, the backend image, the checkout) before blaming the test.
-* **TC_IDM_10_2 fails with "Problems with conformance"** on `chip-all-clusters-app`: it is the device conformance test, it
-  runs correctly, and the all-clusters app is not meant to be conformant. It is a poor representative for the Mandatories
-  suite on this DUT; pick another test from that suite (`--only python-mandatories` makes trying candidates quick).
+* **Choosing the Mandatories test.** Any of the suite's tests can represent it, but they judge the DUT differently.
+  `TC_IDM_10_2` (conformance) fails on `chip-all-clusters-app` with "Problems with conformance": it runs correctly and the
+  all-clusters app is not meant to be conformant. `TC_IDM_10_5` (device types, extra clusters fail by default) is likely to
+  fail for the same reason; `TC_IDM_10_3` (cluster revisions) depends on the DUT's SDK version; `TC_IDM_10_4` needs
+  `--endpoint` and matching PICS. The shipped manifest uses `TC_IDM_12_1`, which only does a wildcard read and writes the
+  device dump, so it checks the TH pipeline without judging the DUT. Swap it for a stricter test when the DUT is a real
+  product; `--only python-mandatories` makes trying one take about a minute.
 * **TC_CGEN_2_5 needs PIXIT parameters** (`PIXIT.CGEN.FailsafeExpiryLengthSeconds`, `RequiredTCAcknowledgements`,
   `TCRevision`); without them it dies with a `KeyError`. The manifest now passes them with `test_args`. Whether the
   all-clusters app supports Terms and Conditions (and whether the project's PICS enable `CGEN.S.F00`) is not known; a skipped
