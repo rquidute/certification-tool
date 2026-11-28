@@ -46,8 +46,16 @@ def preclean(s: Session) -> None:
         s.cli_step(f"preclean-project-{p['id']}", g, ["project", "delete", "-i", str(p["id"]), "-y"])
 
 
-def final_cleanup(s: Session) -> None:
-    """Best effort. A second Ctrl-C must not abandon the remaining cleanup steps."""
+def keep_project(s: Session, policy: str) -> bool:
+    """always / never / auto (= keep when the run did not end GO, so the failing commands can be re-run)."""
+    return policy == "always" or (policy == "auto" and not s.results.is_go())
+
+
+def final_cleanup(s: Session, keep: str = "never") -> None:
+    """Best effort. A second Ctrl-C must not abandon the remaining cleanup steps.
+
+    The throwaway project is deleted unless `keep` says otherwise. The commands in the report refer to it by id
+    (`th-cli project logs -i 21 ...`), so once it is gone a failed step cannot be reproduced."""
     def guarded(label: str, fn) -> None:
         try:
             fn()
@@ -56,10 +64,15 @@ def final_cleanup(s: Session) -> None:
 
     guarded("abort running test", lambda: s.th.run(["abort-testing"], timeout=60))
     guarded("stop DUT", s.dut.stop)
-    for pid in [*s.extra_projects, s.project_id]:
+    kept = s.project_id is not None and keep_project(s, keep)
+    for pid in [*s.extra_projects, None if kept else s.project_id]:
         if pid is not None:
             guarded(f"delete project {pid}", lambda pid=pid: s.cli_step(
                 f"cleanup-project-{pid}", "cleanup", ["project", "delete", "-i", str(pid), "-y"]))
+    if kept:
+        s.record("kept-project", "cleanup", PASS,
+                 f"kept project {s.project_id} so the commands in this report can be re-run against it. The next sanity run "
+                 f"deletes it in its pre-flight, or: th-cli project delete -i {s.project_id} -y")
 
 
 def stop_existing_dut(s: Session, found: List[Tuple[int, str]]) -> None:

@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from .. import console
 from ..results import FAIL, NOT_RUN, PASS
+from ..runtest import merge_repeated_flags
 from ..session import Session, shell_join
 
 G = "cli"
@@ -35,7 +36,7 @@ def run(s: Session) -> None:
     if s.project_id:
         args += ["--project-id", str(s.project_id)]
     if meta.get("test_args"):
-        args += ["--", *meta["test_args"]]
+        args += ["--", *merge_repeated_flags(meta["test_args"])]
     cmd = shell_join(args) + "   # then aborted with: " + shell_join([s.th.binary, "abort-testing"])
     dcmd = getattr(s.dut, "last_command", "") if meta.get("dut") else ""
 

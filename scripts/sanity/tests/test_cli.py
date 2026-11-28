@@ -24,6 +24,10 @@ class StartupSafety(unittest.TestCase):
         with open(self.manifest, "w") as f:
             json.dump({"dut_profiles": {"d": {"binary": NAME, "wipe": ""}}, "apps_dir": self.tmp, "suites": []}, f)
         self.out = os.path.join(self.tmp, "out")
+        # main() takes a real per-host lock; several calls in one process would collide with each other
+        patcher = mock.patch.object(cli, "acquire_lock", return_value=mock.Mock())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def main(self, *args, running=None, after=None):
         """Run cli.main with the process list scripted: `running` at startup, `after` once it was asked to stop."""
@@ -141,6 +145,36 @@ class StartupSafety(unittest.TestCase):
                 mock.patch.object(cli.suites, "run", side_effect=lambda s: ran.append(1)):
             cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--yes", "--only", "a", "--color", "never"])
         self.assertEqual(ran, [])
+
+    def test_a_second_run_is_refused_while_another_holds_the_lock(self):
+        from th_sanity.lock import LockHeld
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()), \
+                mock.patch.object(cli, "acquire_lock", side_effect=LockHeld("another sanity run is in progress (pid 99)")), \
+                mock.patch.object(DutManager, "find_running", return_value=[]):
+            code = cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--yes"])
+        self.assertEqual(code, 2)
+        self.assertIn("pid 99", err.getvalue())
+        self.assertIn("Nothing was changed", err.getvalue())
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_dry_run_and_list_suites_do_not_need_the_lock(self):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                mock.patch.object(cli, "acquire_lock", side_effect=AssertionError("lock must not be taken")), \
+                mock.patch.object(cli, "PHASES", []), mock.patch.object(cli.preclean, "preclean"), \
+                mock.patch.object(ThCli, "run", return_value=(0, "")):
+            self.assertEqual(cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--dry-run"]), 0)
+
+    def test_keep_project_flag_reaches_the_cleanup(self):
+        seen = {}
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                mock.patch.object(cli, "acquire_lock"), mock.patch.object(cli, "PHASES", []), \
+                mock.patch.object(cli.preclean, "preclean"), mock.patch.object(DutManager, "find_running", return_value=[]), \
+                mock.patch.object(cli.preclean, "final_cleanup", side_effect=lambda s, keep: seen.setdefault("keep", keep)), \
+                mock.patch.object(ThCli, "run", return_value=(0, "")):
+            cli.main(["--manifest", self.manifest, "--out-dir", self.out, "--yes"])
+            cli.main(["--manifest", self.manifest, "--out-dir", self.out + "2", "--yes", "--keep-project", "always"])
+        self.assertEqual(seen["keep"], "auto")  # first call wins in setdefault: the default is auto
 
     def test_dry_run_neither_refuses_nor_stops(self):
         code, _, _ = self.main("--dry-run", running=self.RUNNING)

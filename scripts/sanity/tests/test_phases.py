@@ -650,10 +650,10 @@ class TestArgs(unittest.TestCase):
         s.project_id = 7
         run_test(s, "run-x", "suites", "TC_CGEN_2_5", "pass", [], None, "fresh", config="/m/c.json", test_args=self.ARGS)
         args = prompts.calls[0]["args"]
-        self.assertEqual(args[args.index("--"):], ["--", *self.ARGS])
+        self.assertEqual(args[args.index("--"):], ["--", "--int-arg", "PIXIT.CGEN.TCRevision:1 PIXIT.CGEN.RequiredTCAcknowledgements:1"])
         self.assertLess(args.index("-c"), args.index("--"))
         self.assertLess(args.index("--project-id"), args.index("--"))
-        self.assertIn("-- --int-arg PIXIT.CGEN.TCRevision:1", s.results.steps[0]["command"])
+        self.assertIn("-- --int-arg 'PIXIT.CGEN.TCRevision:1 PIXIT.CGEN.RequiredTCAcknowledgements:1'", s.results.steps[0]["command"])
 
     def test_no_test_args_means_no_double_dash(self):
         prompts = FakePrompts(("Results: 1 passed\n", 0, ""))
@@ -675,6 +675,39 @@ class TestArgs(unittest.TestCase):
                                          "PIXIT.CGEN.TCRevision"])
 
 
+class MergeRepeatedFlags(unittest.TestCase):
+    def test_repeated_int_args_become_one_space_separated_argument(self):
+        from th_sanity.runtest import merge_repeated_flags
+        self.assertEqual(merge_repeated_flags(["--int-arg", "A:1", "--int-arg", "B:2", "--int-arg", "C:3"]),
+                         ["--int-arg", "A:1 B:2 C:3"])
+
+    def test_other_flags_are_kept_and_order_follows_first_use(self):
+        from th_sanity.runtest import merge_repeated_flags
+        self.assertEqual(merge_repeated_flags(["--timeout", "60", "--int-arg", "A:1", "--bool-arg", "x:true", "--int-arg", "B:2"]),
+                         ["--timeout", "60", "--int-arg", "A:1 B:2", "--bool-arg", "x:true"])
+
+    def test_a_flag_without_a_value_stays_a_flag_and_empty_input_stays_empty(self):
+        from th_sanity.runtest import merge_repeated_flags
+        self.assertEqual(merge_repeated_flags(["--verbose", "--int-arg", "A:1"]), ["--verbose", "--int-arg", "A:1"])
+        self.assertEqual(merge_repeated_flags([]), [])
+
+    def test_the_th_cli_parser_then_sees_every_value(self):
+        """The merged form survives th-cli's own inline-argument parser; the unmerged form loses values."""
+        import importlib.util
+        cli_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "cli", "th_cli", "commands", "run_tests.py")
+        if not os.path.exists(cli_src):
+            self.skipTest("th-cli sources not next to the harness")
+        text = open(cli_src).read()
+        start = text.index("def _parse_extra_args")
+        end = text.index("return params", start) + len("return params")
+        namespace: dict = {}
+        exec(compile(text[start:end], "parse_extra_args", "exec"), namespace)  # just the pure parser function
+        from th_sanity.runtest import merge_repeated_flags
+        raw = ["--int-arg", "A:1", "--int-arg", "B:2", "--int-arg", "C:3"]
+        self.assertEqual(namespace["_parse_extra_args"](raw), {"int-arg": "C:3"})  # the bug: A and B are lost
+        self.assertEqual(namespace["_parse_extra_args"](merge_repeated_flags(raw)), {"int-arg": "A:1 B:2 C:3"})
+
+
 class OnlyFilter(unittest.TestCase):
     ENTRIES = [{"id": "a", "suite": "S", "test": "T", "dut": None}, {"id": "b", "suite": "S", "test": "T", "dut": None},
                {"id": "c", "suite": "S", "test": "T", "dut": None, "depends_on": "a"}]
@@ -694,6 +727,63 @@ class OnlyFilter(unittest.TestCase):
         with mock.patch.object(suites, "run_test", side_effect=lambda s_, sid, *a, **k: (ran.append(sid), s_.record(sid, "suites", PASS))[0]):
             suites.run(s)
         self.assertEqual(ran, ["run-a", "run-b", "run-c"])
+
+
+class KeepProject(unittest.TestCase):
+    """The commands in the report refer to the throwaway project by id, so a failed run keeps it for reproduction."""
+
+    def run_cleanup(self, policy, steps_status):
+        s = make_session()
+        s.project_id, s.extra_projects = 21, [22]
+        for i, st in enumerate(steps_status):
+            s.record(f"s{i}", "suites", st)
+        preclean.final_cleanup(s, keep=policy)
+        deleted = [c[3] for c in s.th.calls if c[:2] == ["project", "delete"]]
+        return s, deleted
+
+    def test_auto_deletes_everything_when_the_run_is_go(self):
+        s, deleted = self.run_cleanup("auto", [PASS])
+        self.assertEqual(deleted, ["22", "21"])
+        self.assertIsNone(status_of(s, "kept-project"))
+
+    def test_auto_keeps_the_project_but_not_the_import_copy_when_the_run_is_not_go(self):
+        s, deleted = self.run_cleanup("auto", [PASS, FAIL])
+        self.assertEqual(deleted, ["22"])
+        step = next(x for x in s.results.steps if x["id"] == "kept-project")
+        self.assertEqual(step["status"], PASS)
+        self.assertIn("project 21", step["detail"])
+        self.assertIn("th-cli project delete -i 21 -y", step["detail"])
+
+    def test_always_keeps_and_never_deletes(self):
+        self.assertEqual(self.run_cleanup("always", [PASS])[1], ["22"])
+        self.assertEqual(self.run_cleanup("never", [PASS, FAIL])[1], ["22", "21"])
+
+    def test_the_default_for_final_cleanup_is_to_delete(self):
+        s = make_session()
+        s.project_id = 5
+        s.record("x", "suites", FAIL)
+        preclean.final_cleanup(s)
+        self.assertTrue(s.th.called("project", "delete", "-i", "5", "-y"))
+
+
+class RunLock(unittest.TestCase):
+    def test_a_second_run_cannot_take_the_lock_and_is_told_who_has_it(self):
+        from th_sanity.lock import LockHeld, acquire_lock
+        path = os.path.join(tempfile.mkdtemp(), "th-sanity.lock")
+        first = acquire_lock(path)
+        try:
+            with self.assertRaises(LockHeld) as cm:
+                acquire_lock(path)
+            self.assertIn(str(os.getpid()), str(cm.exception))
+            self.assertIn("another sanity run is in progress", str(cm.exception))
+        finally:
+            first.close()
+
+    def test_the_lock_is_released_when_the_holder_goes_away(self):
+        from th_sanity.lock import acquire_lock
+        path = os.path.join(tempfile.mkdtemp(), "th-sanity.lock")
+        acquire_lock(path).close()
+        acquire_lock(path).close()  # no stale lock after a normal exit (a crash behaves the same: flock dies with the process)
 
 
 class Report(unittest.TestCase):

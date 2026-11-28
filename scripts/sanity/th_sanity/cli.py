@@ -30,6 +30,7 @@ from typing import List, Optional, Tuple
 from . import console
 from .console import paint
 from .dut import DutError
+from .lock import LockHeld, acquire_lock
 from .versions import describe, label_matches, parse_versions
 from .phases import abort, cli_commands, coverage, custom, executions, preclean, suites
 from .report import write_report
@@ -90,6 +91,9 @@ def build_parser(default_manifest: str) -> argparse.ArgumentParser:
     ap.add_argument("--only", default="", metavar="ID[,ID...]",
                     help="focused run: only these suites[] entries (plus the entries they depend on); skips the CLI, custom and "
                          "execution phases, so it is NOT a release verdict. Use it to iterate on a failing suite")
+    ap.add_argument("--keep-project", choices=["auto", "always", "never"], default="auto",
+                    help="keep the throwaway project after the run so failing commands can be re-run against it "
+                         "(auto = only when the run did not end GO; the next run's pre-flight deletes it)")
     ap.add_argument("--no-preclean", action="store_true", help="do not delete leftover sanity projects from earlier sessions")
     ap.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                     help="colored output (auto = only on a terminal and when NO_COLOR is not set)")
@@ -130,6 +134,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         for sid, tests in sorted(s.live.items()):
             print(f"{sid!r}: {len(tests)} tests, e.g. {sorted(tests)[:3]}")
         return 0
+
+    # Two runs at once would share the engine and the DUT and delete each other's projects.
+    if not a.dry_run:
+        try:
+            s.lock = acquire_lock()
+        except LockHeld as e:
+            print(f" {e}. Nothing was changed.", file=sys.stderr)
+            return 2
 
     # A DUT app that is already running would be killed on the first test. Never do that silently.
     try:
@@ -177,7 +189,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         if not a.dry_run:  # dry run must never kill a DUT app the user is running
             try:
-                preclean.final_cleanup(s)
+                preclean.final_cleanup(s, keep=a.keep_project)
             except KeyboardInterrupt:
                 print("cleanup interrupted; writing report anyway", flush=True)
     return write_report(s, version)

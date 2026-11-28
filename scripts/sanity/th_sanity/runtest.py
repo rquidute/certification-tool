@@ -11,6 +11,24 @@ from .results import FAIL, PASS
 from .session import Session, shell_join
 
 
+def merge_repeated_flags(args: List[str]) -> List[str]:
+    """['--int-arg','A:1','--int-arg','B:2'] -> ['--int-arg','A:1 B:2'].
+
+    th-cli keeps one value per inline flag, so a repeated `--int-arg` silently drops all but the last one (observed:
+    three PIXIT values passed, one reached the test). The TH expects several values as one space-separated argument,
+    the same format as the `int-arg` entries of a --tc-params-file."""
+    merged: dict = {}
+    for i, a in enumerate(args):
+        if a.startswith("-"):
+            merged.setdefault(a, [])
+            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                merged[a].append(args[i + 1])
+    out: List[str] = []
+    for flag, values in merged.items():
+        out += [flag] + ([" ".join(values)] if values else [])
+    return out
+
+
 def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: List[dict], dut: Optional[str],
              dut_start: str, config: Optional[str] = None, timeout: Optional[int] = None,
              text_answers: Optional[List[dict]] = None, test_args: Optional[List[str]] = None) -> Optional[int]:
@@ -33,7 +51,7 @@ def run_test(s: Session, sid: str, group: str, test: str, expect: str, answers: 
     if config:
         args += ["-c", config]
     if test_args:  # inline test parameters, e.g. ["--int-arg", "PIXIT.CGEN.TCRevision:1"]
-        args += ["--", *test_args]
+        args += ["--", *merge_repeated_flags(test_args)]
     cmd, dut_cmd = shell_join(args), (getattr(s.dut, "last_command", "") if dut else "")
     out, rc, why = s.prompts.run(args, answers + s.m.get("default_prompt_answers", []), timeout,
                                  transcript=os.path.join(sdir, "transcript.out"), text_rules=text_answers,

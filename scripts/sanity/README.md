@@ -119,6 +119,7 @@ manifest against the live TH without running anything.
 | `--yes` | skip the "close the TH UI" confirmation (unattended runs; without a terminal it is required) |
 | `--kill-existing` | allow the harness to stop a DUT app that is already running (otherwise it refuses to start) |
 | `--only ID[,ID...]` | **focused run** for iterating on a failing suite: runs only those `suites[]` entries (plus the entries they `depends_on`) in a throwaway project and skips the CLI, custom and execution phases. The report is marked *not a release verdict*. Example: `--only python-mandatories` |
+| `--keep-project auto\|always\|never` | keep the throwaway project after the run so the commands in the report can be re-run against it (their `-i <id>` otherwise points at a deleted project). `auto` (default) keeps it only when the run did not end GO; the next run's pre-flight deletes it |
 | `--no-preclean` | do not delete leftover `sanity-*` projects from earlier sessions |
 | `--color auto\|always\|never` | colour output; `auto` = only on a terminal and when `NO_COLOR` is unset. Use `always` with `tee`, then `less -R` |
 
@@ -145,8 +146,9 @@ With `--kill-existing`, a running DUT app is stopped here and recorded as the st
 | 4 | **Custom tests** | SDK tests are copied into the custom folders, **one** rescan, each must appear in its expected `<suite>-custom` suite, runnable ones are run, files removed, **one** rescan, each must be gone |
 | 5 | **Executions and runs** | `test-run-execution` list/show/log/pics-export/rename/archive/unarchive/export/import/delete, `project logs`, **repeat** of a previous run (new execution, same final state), and **abort of a run that is actually running** (abort accepted, `th-cli` exits, engine returns to idle, execution ends `cancelled`) |
 
-**Cleanup** (always, except `--dry-run`): abort any run, stop the DUT, delete the throwaway projects (not scoped to what
-the harness started, see limitations). A second Ctrl-C
+**Cleanup** (always, except `--dry-run`): abort any run, stop the DUT, delete the import copy and, unless it is kept (see
+`--keep-project`), the throwaway project (not scoped to what the harness started, see limitations). When the project is
+kept, the step `kept-project` says which one and how to delete it. A second Ctrl-C
 does not abandon the remaining cleanup steps.
 
 ### Verdict rules
@@ -220,6 +222,7 @@ The harness changes real things (kills processes, deletes projects, copies files
 | Process list cannot be read (`ps` failed) | Refuses to start instead of assuming nothing runs |
 | TH UI open | Asks you to close it and waits for Enter (n / Ctrl-C / Ctrl-D cancels, nothing changed) |
 | Test engine busy at start | `runner-idle-before-abort` fails and the idle-abort check is skipped, so that check never aborts a run it did not start (the final cleanup does, see [limitations](#known-limitations-and-open-findings)) |
+| Two harness runs at once | Refused (exit 2): a per-host lock is held for the life of the process (a crash releases it). Two runs would share the test engine and the DUT, and one's pre-flight would delete the other's live project |
 | Leftover projects | Only names matching `cleanup.project_name_regex` are deleted; refuses if more than `cleanup.max_delete` match; never in `--dry-run` |
 | Custom folder already has the fixture file | Step is skipped (`NOT_RUN`); a user file is never overwritten or deleted |
 | Custom YAML test with the same id as the SDK test | Not run: `th-cli run-tests -t <id>` cannot choose between them, so a PASS could silently be the SDK test |
@@ -459,10 +462,14 @@ the factory-reset `wipe` is disabled in tests, so they never touch a real app or
   `--endpoint` and matching PICS. The shipped manifest uses `TC_IDM_12_1`, which only does a wildcard read and writes the
   device dump, so it checks the TH pipeline without judging the DUT. Swap it for a stricter test when the DUT is a real
   product; `--only python-mandatories` makes trying one take about a minute.
-* **TC_CGEN_2_5 needs PIXIT parameters** (`PIXIT.CGEN.FailsafeExpiryLengthSeconds`, `RequiredTCAcknowledgements`,
-  `TCRevision`); without them it dies with a `KeyError`. The manifest now passes them with `test_args`. Whether the
-  all-clusters app supports Terms and Conditions (and whether the project's PICS enable `CGEN.S.F00`) is not known; a skipped
-  test is reported as FAIL, not as a pass.
+* **`th-cli run-tests -- --int-arg A:1 --int-arg B:2` silently keeps only the last `--int-arg`** (`_parse_extra_args` stores one
+  value per flag). Observed: three PIXIT values passed, the CLI echoed `{"int-arg": "PIXIT.CGEN.TCRevision:1"}` and
+  TC_CGEN_2_5 still died with `KeyError: 'PIXIT.CGEN.FailsafeExpiryLengthSeconds'`. The TH accepts several values as one
+  space-separated argument (`--int-arg "A:1 B:2"`, the format of a `--tc-params-file`), so the harness merges repeated flags
+  from `test_args` into one argument. Suspected CLI bug: no error or warning is shown when values are dropped.
+* **TC_CGEN_2_5 needs three PIXIT parameters** (`PIXIT.CGEN.FailsafeExpiryLengthSeconds`, `RequiredTCAcknowledgements`,
+  `TCRevision`), listed in the SDK script's own header. Whether the all-clusters app supports Terms and Conditions (and
+  whether the project's PICS enable `CGEN.S.F00`) is not known; a skipped test is reported as FAIL, not as a pass.
 * **File-upload prompts are always skipped.** A manual test that needs a real file will fail visibly.
 * **Reuse readiness** was confirmed on the Pi: a device that kept its fabric announces `_matter._tcp`, not
   `_matterc._udp`. If a reuse start ever fails, read that step's `dut.log` (the quiet-log fallback exists for other builds).
